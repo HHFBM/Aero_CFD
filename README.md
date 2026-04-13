@@ -12,7 +12,7 @@
 ## 当前支持能力
 
 - 几何：NACA 4-digit 参数化翼型
-- 数据：toy synthetic dataset、NPZ 文件数据集读取，预留 CSV/Parquet/Pickle 接口
+- 数据：toy synthetic dataset、AirfRANS 转换接入、NPZ 文件数据集读取，预留 CSV/Parquet/Pickle 接口
 - 模型：DeepONet 主模型，FNO / GeoFNO placeholder
 - 输出：
   - 查询点处流场变量 `u, v, p, rho`
@@ -21,11 +21,13 @@
 - 训练：
   - 纯监督训练
   - physics-informed 混合训练
+  - boundary consistency 约束训练
   - checkpoint / best model / early stopping / history 记录
 - 评测：
   - field MSE / RMSE / relative error
   - `Cp` 误差
   - `Cl/Cd` MAE / relative error
+  - `IID / unseen geometry / unseen condition` 多测试切片
   - 图像与 markdown/json 报告
 - 推理：
   - 单样本 CLI
@@ -35,11 +37,15 @@
 
 - 当前是 **二维参数化翼型代理模型**，不是工业级三维 CFD 求解器替代品。
 - toy dataset 仅用于演示工程闭环，不代表真实工程精度，也不能用于结论性气动设计。
+- AirfRANS 当前以“离线转换到统一 NPZ schema”的方式接入，训练主线不直接依赖 AirfRANS 原始 API。
 - physics-informed 模块采用 **二维稳态可压缩 Euler 简化残差**：
   - continuity residual
   - x-momentum residual
   - y-momentum residual
   - optional energy residual
+- boundary consistency 模块当前包含：
+  - 壁面无穿透约束
+  - 远场状态一致性约束
 - 残差由自动微分计算，目的是提供物理结构约束，不对应真实求解器的离散守恒格式。
 - 当前数据生成与物理项默认假设远场静压 `p_inf=1`、比热比 `gamma=1.4`，且未显式建模粘性边界层和激波捕捉。
 
@@ -57,6 +63,7 @@ geometry params + flow conditions + query points
          - surface Cp loss
          - scalar loss
          - physics residual loss
+         - boundary consistency loss
     -> trainer / evaluator / inference / API
 ```
 
@@ -100,6 +107,12 @@ pip install -r requirements.txt
 pip install -e .
 ```
 
+如果要接入 AirfRANS，再额外安装可选数据依赖：
+
+```bash
+pip install ".[data]"
+```
+
 如果本机 `matplotlib` 无法写默认缓存目录，可临时设置：
 
 ```bash
@@ -139,10 +152,17 @@ python scripts/prepare_dataset.py --config configs/default.yaml
 python scripts/prepare_dataset.py \
   --config configs/default.yaml \
   --override data.dataset_path=outputs/data/toy_small.npz \
-  --override data.num_samples=64 \
+  --override data.num_geometries=8 \
+  --override data.conditions_per_geometry=8 \
   --override data.num_query_points=128 \
   --override data.num_surface_points=80
 ```
+
+当前 toy dataset 会显式生成：
+
+- seen geometry / seen condition 的 `train / val / test`
+- `test_unseen_geometry`
+- `test_unseen_condition`
 
 ### 2. 当前样本字段
 
@@ -154,7 +174,10 @@ python scripts/prepare_dataset.py \
 - `branch_inputs`
 - `query_points`
 - `field_targets`
+- `farfield_mask`
+- `farfield_targets`
 - `surface_points`
+- `surface_normals`
 - `surface_cp`
 - `scalar_targets`
 - `metadata`
@@ -165,6 +188,47 @@ python scripts/prepare_dataset.py \
 ### 3. 文件型数据集
 
 当前主路径是 `.npz`。默认 toy dataset 会保存为定长数组格式，便于直接训练。CSV/Parquet/Pickle 的接口已预留，但真实生产环境建议统一整理成 NPZ 或者自定义 reader。
+
+### 4. AirfRANS 数据接入
+
+当前已支持把官方 AirfRANS 数据集下载并转换成项目自己的统一 `.npz` 格式。
+
+转换命令：
+
+```bash
+python scripts/prepare_dataset.py \
+  --config configs/default.yaml \
+  --override data.dataset_type=airfrans \
+  --override data.dataset_path=outputs/data/airfrans_full.npz \
+  --override data.airfrans_root=outputs/data/airfrans_raw \
+  --override data.airfrans_task=full
+```
+
+也可以限制样本数做快速验证：
+
+```bash
+python scripts/prepare_dataset.py \
+  --config configs/default.yaml \
+  --override data.dataset_type=airfrans \
+  --override data.dataset_path=outputs/data/airfrans_tiny.npz \
+  --override data.airfrans_root=outputs/data/airfrans_raw \
+  --override data.airfrans_task=full \
+  --override data.airfrans_max_samples=32
+```
+
+AirfRANS 转换后的字段映射为：
+
+- `field_targets = [u, v, p, rho]`
+  - 其中 `rho` 当前按不可压设置为常数空气密度
+- `surface_cp`
+  - 由 AirfRANS 压力和动态压换算
+- `scalar_targets = [cl, cd]`
+  - 由官方 `Simulation.force_coefficient(reference=True)` 计算
+
+注意：
+
+- AirfRANS 是 **不可压缩 RANS** 数据，不是你当前项目目标里的可压 Euler 高保真数据。
+- 如果用 AirfRANS 训练，建议把 physics loss 视为弱约束，并结合任务需要重新调 `physics_weight`。
 
 ## 训练
 
@@ -182,7 +246,17 @@ python scripts/train.py \
 python scripts/train.py \
   --config configs/default.yaml \
   --override loss.use_physics=true \
-  --override loss.physics_weight=0.1
+  --override loss.physics_weight=0.1 \
+  --override loss.boundary_weight=0.1
+```
+
+用 AirfRANS 训练时，先把 `dataset_type` 改成 `file`，读取转换后的 NPZ：
+
+```bash
+python scripts/train.py \
+  --config configs/default.yaml \
+  --override data.dataset_type=file \
+  --override data.dataset_path=outputs/data/airfrans_full.npz
 ```
 
 训练输出默认保存到：
@@ -208,6 +282,24 @@ outputs/<experiment.name>/
 python scripts/evaluate.py \
   --config configs/default.yaml \
   --checkpoint outputs/default_run/checkpoints/best.pt
+```
+
+评测 unseen geometry：
+
+```bash
+python scripts/evaluate.py \
+  --config configs/default.yaml \
+  --checkpoint outputs/default_run/checkpoints/best.pt \
+  --override eval.split_name=test_unseen_geometry
+```
+
+评测 unseen condition：
+
+```bash
+python scripts/evaluate.py \
+  --config configs/default.yaml \
+  --checkpoint outputs/default_run/checkpoints/best.pt \
+  --override eval.split_name=test_unseen_condition
 ```
 
 关闭绘图时：
@@ -320,6 +412,8 @@ pytest -q
 - physics-informed 残差是连续方程近似，不是离散 CFD scheme。
 - 没有显式粘性项、湍流模型、壁函数和 shock-aware 建模。
 - toy 数据是规则生成的 pseudo-CFD 场，不代表真实数值求解器行为。
+- boundary consistency 当前仍是简化约束，不等同于完整边界条件离散实现。
+- AirfRANS 接入当前主要面向数据替换和工程验证，不代表已完成最优的不可压缩 RANS 专用建模。
 - multifidelity 只完成接口预留，未实现完整联合训练策略。
 - FNO / GeoFNO 仅有占位类，未给出可训练实现。
 - API 当前是同步推理，不含批任务队列、模型热更新、鉴权和观测性。

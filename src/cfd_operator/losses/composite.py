@@ -38,7 +38,19 @@ def regression_loss(
     raise ValueError(f"Unsupported loss type: {loss_type}")
 
 
-def pressure_to_cp(pressure: torch.Tensor, mach: torch.Tensor, gamma: float = 1.4, p_inf: float = 1.0) -> torch.Tensor:
+def pressure_to_cp(
+    pressure: torch.Tensor,
+    mach: Optional[torch.Tensor] = None,
+    gamma: float = 1.4,
+    p_inf: float = 1.0,
+    cp_reference: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
+    if cp_reference is not None:
+        p_ref = cp_reference[..., 0:1]
+        q_ref = torch.clamp(cp_reference[..., 1:2], min=1.0e-4)
+        return (pressure - p_ref) / q_ref
+    if mach is None:
+        raise ValueError("Either mach or cp_reference must be provided.")
     q_inf = 0.5 * gamma * p_inf * mach**2
     q_inf = torch.clamp(q_inf, min=1.0e-4)
     return (pressure - p_inf) / q_inf
@@ -69,7 +81,7 @@ class CompositeLoss:
         )
         surface_loss = self._surface_cp_loss(model=model, batch=batch)
         physics_loss = self._physics_loss(model=model, batch=batch) if self.config.use_physics else torch.zeros_like(field_loss)
-        boundary_loss = torch.zeros_like(field_loss)
+        boundary_loss = self._boundary_loss(model=model, batch=batch, outputs=outputs)
 
         total_loss = (
             self.config.field_weight * field_loss
@@ -92,8 +104,8 @@ class CompositeLoss:
         surface_outputs = model.loss_outputs(batch["branch_inputs"], batch["surface_points"])
         surface_fields = self.normalizers.fields.inverse_transform_tensor(surface_outputs["fields"])
         pressure = surface_fields[..., 2:3]
-        mach = batch["flow_conditions"][:, 0].unsqueeze(1).unsqueeze(2)
-        cp_pred = pressure_to_cp(pressure=pressure, mach=mach)
+        cp_reference = batch["cp_reference"].unsqueeze(1)
+        cp_pred = pressure_to_cp(pressure=pressure, cp_reference=cp_reference)
         return regression_loss(cp_pred, batch["surface_cp"], loss_type="mse", mask=batch["surface_mask"])
 
     def _physics_loss(self, model: BaseOperatorModel, batch: dict[str, Any]) -> torch.Tensor:
@@ -111,3 +123,28 @@ class CompositeLoss:
         for residual in residuals.values():
             losses.append(masked_reduce(residual**2, mask=batch["query_mask"], reduction="mean"))
         return torch.stack(losses).mean()
+
+    def _boundary_loss(
+        self,
+        model: BaseOperatorModel,
+        batch: dict[str, Any],
+        outputs: dict[str, torch.Tensor],
+    ) -> torch.Tensor:
+        if self.config.boundary_weight <= 0.0:
+            return outputs["fields"].new_zeros(())
+        query_fields = self.normalizers.fields.inverse_transform_tensor(outputs["fields"])
+        farfield_targets = batch["farfield_targets"].unsqueeze(1).expand_as(query_fields)
+        farfield_loss = regression_loss(
+            query_fields,
+            farfield_targets,
+            loss_type="mse",
+            mask=batch["farfield_mask"] * batch["query_mask"],
+        )
+
+        surface_outputs = model.loss_outputs(batch["branch_inputs"], batch["surface_points"])
+        surface_fields = self.normalizers.fields.inverse_transform_tensor(surface_outputs["fields"])
+        velocity = surface_fields[..., :2]
+        surface_normals = batch["surface_normals"]
+        normal_velocity = (velocity * surface_normals).sum(dim=-1)
+        wall_loss = masked_reduce(normal_velocity**2, mask=batch["surface_mask"], reduction="mean")
+        return 0.5 * (farfield_loss + wall_loss)

@@ -14,7 +14,9 @@ def test_composite_loss_runs(tmp_path: Path) -> None:
     data_config = DataConfig(
         dataset_type="synthetic",
         dataset_path=str(tmp_path / "toy_dataset.npz"),
-        num_samples=8,
+        num_samples=16,
+        num_geometries=4,
+        conditions_per_geometry=4,
         num_query_points=24,
         num_surface_points=20,
     )
@@ -33,8 +35,8 @@ def test_composite_loss_runs(tmp_path: Path) -> None:
     )
     model = create_model(model_config)
     outputs = model(batch["branch_inputs"], batch["query_points"])
-    loss_fn = CompositeLoss(config=LossConfig(use_physics=True), normalizers=data_module.normalizers)
+    loss_fn = CompositeLoss(config=LossConfig(use_physics=True, boundary_weight=0.2), normalizers=data_module.normalizers)
     total_loss, metrics = loss_fn(model=model, batch=batch, outputs=outputs)
     assert torch.isfinite(total_loss)
     assert metrics["loss_total"] >= 0.0
-
+    assert metrics["loss_boundary"] >= 0.0

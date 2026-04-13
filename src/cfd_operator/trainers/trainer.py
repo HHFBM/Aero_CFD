@@ -97,13 +97,22 @@ class Trainer:
             self.history.append(record)
             self._save_history()
             self.logger.info(
-                "epoch=%d train_total=%.6f train_field=%.6f train_scalar=%.6f train_physics=%.6f val_total=%.6f",
+                (
+                    "epoch=%d train_total=%.6f train_field=%.6f train_surface=%.6f "
+                    "train_scalar=%.6f train_physics=%.6f train_boundary=%.6f "
+                    "val_total=%.6f val_field=%.6f val_scalar=%.6f val_physics=%.6f"
+                ),
                 epoch + 1,
                 train_metrics["loss_total"],
                 train_metrics["loss_field"],
+                train_metrics["loss_surface"],
                 train_metrics["loss_scalar"],
                 train_metrics["loss_physics"],
+                train_metrics["loss_boundary"],
                 val_metrics["loss_total"],
+                val_metrics["loss_field"],
+                val_metrics["loss_scalar"],
+                val_metrics["loss_physics"],
             )
 
             if (epoch + 1) % self.config.train.checkpoint_every_n_epochs == 0:

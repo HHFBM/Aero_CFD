@@ -9,6 +9,7 @@ import numpy as np
 
 from cfd_operator.config.schemas import DataConfig
 from cfd_operator.data.schemas import CFDSample
+from cfd_operator.data.splitting import build_generalization_splits
 from cfd_operator.geometry import NACA4Airfoil, build_branch_features
 from cfd_operator.utils.io import ensure_dir, save_json
 
@@ -92,6 +93,40 @@ def _field_solution(
     return np.stack([u, v, p, rho], axis=1).astype(np.float32)
 
 
+def _freestream_state(mach: float, aoa_deg: float, p_inf: float = 1.0, gamma: float = 1.4) -> np.ndarray:
+    alpha = np.deg2rad(aoa_deg)
+    v_inf = 1.0 + 0.6 * mach
+    u_inf = v_inf * np.cos(alpha)
+    v_inf_y = v_inf * np.sin(alpha)
+    rho_inf = np.clip((p_inf / p_inf) ** (1.0 / gamma), 0.45, 1.6)
+    return np.asarray([u_inf, v_inf_y, p_inf, rho_inf], dtype=np.float32)
+
+
+def _surface_normals(surface_points: np.ndarray) -> np.ndarray:
+    forward = np.roll(surface_points, -1, axis=0) - surface_points
+    backward = surface_points - np.roll(surface_points, 1, axis=0)
+    tangent = forward + backward
+    tangent_norm = np.linalg.norm(tangent, axis=1, keepdims=True)
+    tangent_norm = np.where(tangent_norm < 1.0e-6, 1.0, tangent_norm)
+    tangent = tangent / tangent_norm
+
+    normals = np.stack([tangent[:, 1], -tangent[:, 0]], axis=1)
+    centroid = surface_points.mean(axis=0, keepdims=True)
+    direction = surface_points - centroid
+    flip_mask = (normals * direction).sum(axis=1, keepdims=True) < 0.0
+    normals = np.where(flip_mask, -normals, normals)
+    return normals.astype(np.float32)
+
+
+def _farfield_mask(points: np.ndarray) -> np.ndarray:
+    mask = (
+        (points[:, 0] <= -0.2)
+        | (points[:, 0] >= 1.2)
+        | (np.abs(points[:, 1]) >= 0.45)
+    )
+    return mask.astype(np.float32)
+
+
 @dataclass(slots=True)
 class SyntheticAirfoilDatasetGenerator:
     config: DataConfig
@@ -100,58 +135,86 @@ class SyntheticAirfoilDatasetGenerator:
     def _rng(self) -> np.random.Generator:
         return np.random.default_rng(self.seed)
 
-    def generate_samples(self) -> list[CFDSample]:
-        rng = self._rng()
-        samples: list[CFDSample] = []
-        for index in range(self.config.num_samples):
-            max_camber = float(rng.uniform(0.0, 0.06))
-            camber_position = float(rng.uniform(0.2, 0.6))
-            thickness = float(rng.uniform(0.08, 0.18))
-            mach = float(rng.uniform(*self.config.mach_range))
-            aoa = float(rng.uniform(*self.config.aoa_range))
-
-            airfoil = NACA4Airfoil(
-                max_camber=max_camber,
-                camber_position=camber_position,
-                thickness=thickness,
-            )
-
-            query_points = np.empty((self.config.num_query_points, 2), dtype=np.float32)
-            query_points[:, 0] = rng.uniform(-0.5, 1.5, size=self.config.num_query_points)
-            query_points[:, 1] = rng.uniform(-0.6, 0.6, size=self.config.num_query_points)
-
-            surface_points = airfoil.surface_points(self.config.num_surface_points)
-            surface_cp = _surface_cp_distribution(airfoil, surface_points, mach=mach, aoa_deg=aoa)
-            scalar_targets = _lift_drag_coefficients(airfoil, mach=mach, aoa_deg=aoa)
-            field_targets = _field_solution(airfoil, query_points, mach=mach, aoa_deg=aoa)
-
-            geometry_params = airfoil.parameter_vector()
-            flow_conditions = np.asarray([mach, aoa], dtype=np.float32)
-            branch_inputs = build_branch_features(
-                airfoil,
-                mach=mach,
-                aoa_deg=aoa,
-                reynolds=1.0e6 if self.config.include_reynolds else None,
-                mode=self.config.branch_feature_mode,
-            )
-
-            samples.append(
-                CFDSample(
-                    airfoil_id=f"naca-like-{index:05d}",
-                    geometry_params=geometry_params,
-                    flow_conditions=flow_conditions,
-                    branch_inputs=branch_inputs,
-                    query_points=query_points,
-                    field_targets=field_targets,
-                    surface_points=surface_points,
-                    surface_cp=surface_cp,
-                    scalar_targets=scalar_targets,
-                    fidelity_level=0,
-                    source="synthetic_rule",
-                    convergence_flag=1,
+    def _build_geometry_pool(self, rng: np.random.Generator) -> list[NACA4Airfoil]:
+        geometries = []
+        for _ in range(self.config.num_geometries):
+            geometries.append(
+                NACA4Airfoil(
+                    max_camber=float(rng.uniform(0.0, 0.06)),
+                    camber_position=float(rng.uniform(0.2, 0.6)),
+                    thickness=float(rng.uniform(0.08, 0.18)),
                 )
             )
+        return geometries
+
+    def generate_samples(self) -> list[CFDSample]:
+        rng = self._rng()
+        geometries = self._build_geometry_pool(rng)
+        samples: list[CFDSample] = []
+        for geometry_index, airfoil in enumerate(geometries):
+            for _ in range(self.config.conditions_per_geometry):
+                mach = float(rng.uniform(*self.config.mach_range))
+                aoa = float(rng.uniform(*self.config.aoa_range))
+
+                query_points = np.empty((self.config.num_query_points, 2), dtype=np.float32)
+                query_points[:, 0] = rng.uniform(-0.5, 1.5, size=self.config.num_query_points)
+                query_points[:, 1] = rng.uniform(-0.6, 0.6, size=self.config.num_query_points)
+
+                surface_points = airfoil.surface_points(self.config.num_surface_points)
+                surface_normals = _surface_normals(surface_points)
+                surface_cp = _surface_cp_distribution(airfoil, surface_points, mach=mach, aoa_deg=aoa)
+                scalar_targets = _lift_drag_coefficients(airfoil, mach=mach, aoa_deg=aoa)
+                field_targets = _field_solution(airfoil, query_points, mach=mach, aoa_deg=aoa)
+                farfield_targets = _freestream_state(mach=mach, aoa_deg=aoa)
+                cp_reference = np.asarray([1.0, 0.5 * 1.4 * mach**2], dtype=np.float32)
+
+                geometry_params = airfoil.parameter_vector()
+                flow_conditions = np.asarray([mach, aoa], dtype=np.float32)
+                branch_inputs = build_branch_features(
+                    airfoil,
+                    mach=mach,
+                    aoa_deg=aoa,
+                    reynolds=1.0e6 if self.config.include_reynolds else None,
+                    mode=self.config.branch_feature_mode,
+                )
+
+                samples.append(
+                    CFDSample(
+                        airfoil_id=f"naca-like-{geometry_index:04d}",
+                        geometry_params=geometry_params,
+                        flow_conditions=flow_conditions,
+                        branch_inputs=branch_inputs,
+                        query_points=query_points,
+                        field_targets=field_targets,
+                        farfield_mask=_farfield_mask(query_points),
+                        farfield_targets=farfield_targets,
+                        surface_points=surface_points,
+                        surface_normals=surface_normals,
+                        cp_reference=cp_reference,
+                        surface_cp=surface_cp,
+                        scalar_targets=scalar_targets,
+                        fidelity_level=0,
+                        source="synthetic_rule",
+                        convergence_flag=1,
+                    )
+                )
         return samples
+
+    def _split_indices(self, samples: list[CFDSample]) -> dict[str, np.ndarray]:
+        rng = self._rng()
+        airfoil_ids = np.asarray([sample.airfoil_id for sample in samples])
+        mach_values = np.asarray([sample.flow_conditions[0] for sample in samples], dtype=np.float32)
+        aoa_values = np.asarray([sample.flow_conditions[1] for sample in samples], dtype=np.float32)
+        return build_generalization_splits(
+            geometry_ids=airfoil_ids,
+            primary_condition_values=mach_values,
+            secondary_condition_values=aoa_values,
+            unseen_geometry_ratio=self.config.unseen_geometry_ratio,
+            unseen_condition_ratio=self.config.unseen_condition_ratio,
+            train_ratio=self.config.train_ratio,
+            val_ratio=self.config.val_ratio,
+            rng=rng,
+        )
 
     def save(self, path: str | Path) -> Path:
         samples = self.generate_samples()
@@ -169,22 +232,18 @@ class SyntheticAirfoilDatasetGenerator:
             "branch_inputs": np.stack([sample.branch_inputs for sample in samples]).reshape(num_samples, branch_dim),
             "query_points": np.stack([sample.query_points for sample in samples]).reshape(num_samples, num_query_points, 2),
             "field_targets": np.stack([sample.field_targets for sample in samples]),
+            "farfield_mask": np.stack([sample.farfield_mask for sample in samples]).reshape(num_samples, num_query_points),
+            "farfield_targets": np.stack([sample.farfield_targets for sample in samples]),
             "surface_points": np.stack([sample.surface_points for sample in samples]).reshape(num_samples, num_surface_points, 2),
+            "surface_normals": np.stack([sample.surface_normals for sample in samples]).reshape(num_samples, num_surface_points, 2),
+            "cp_reference": np.stack([sample.cp_reference for sample in samples]),
             "surface_cp": np.stack([sample.surface_cp for sample in samples]).reshape(num_samples, num_surface_points, 1),
             "scalar_targets": np.stack([sample.scalar_targets for sample in samples]),
             "fidelity_level": np.asarray([sample.fidelity_level for sample in samples], dtype=np.int64),
             "source": np.asarray([sample.source for sample in samples]),
             "convergence_flag": np.asarray([sample.convergence_flag for sample in samples], dtype=np.int64),
         }
-
-        indices = np.arange(num_samples)
-        rng = self._rng()
-        rng.shuffle(indices)
-        train_end = int(num_samples * self.config.train_ratio)
-        val_end = train_end + int(num_samples * self.config.val_ratio)
-        payload["train_indices"] = indices[:train_end]
-        payload["val_indices"] = indices[train_end:val_end]
-        payload["test_indices"] = indices[val_end:]
+        payload.update(self._split_indices(samples))
 
         np.savez(output_path, **payload)
         save_json(
@@ -192,9 +251,10 @@ class SyntheticAirfoilDatasetGenerator:
             {
                 "dataset_path": str(output_path),
                 "num_samples": num_samples,
+                "num_geometries": self.config.num_geometries,
+                "conditions_per_geometry": self.config.conditions_per_geometry,
                 "num_query_points": num_query_points,
                 "num_surface_points": num_surface_points,
             },
         )
         return output_path
-

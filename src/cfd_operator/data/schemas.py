@@ -16,7 +16,11 @@ class CFDSample:
     branch_inputs: np.ndarray
     query_points: np.ndarray
     field_targets: np.ndarray
+    farfield_mask: np.ndarray
+    farfield_targets: np.ndarray
     surface_points: np.ndarray
+    surface_normals: np.ndarray
+    cp_reference: np.ndarray
     surface_cp: np.ndarray
     scalar_targets: np.ndarray
     fidelity_level: int
@@ -31,11 +35,14 @@ class CFDSample:
             "branch_inputs": self.branch_inputs.astype(np.float32),
             "query_points": self.query_points.astype(np.float32),
             "field_targets": self.field_targets.astype(np.float32),
+            "farfield_mask": self.farfield_mask.astype(np.float32),
+            "farfield_targets": self.farfield_targets.astype(np.float32),
             "surface_points": self.surface_points.astype(np.float32),
+            "surface_normals": self.surface_normals.astype(np.float32),
+            "cp_reference": self.cp_reference.astype(np.float32),
             "surface_cp": self.surface_cp.astype(np.float32),
             "scalar_targets": self.scalar_targets.astype(np.float32),
             "fidelity_level": np.int64(self.fidelity_level),
             "source": self.source,
             "convergence_flag": np.int64(self.convergence_flag),
         }
-

@@ -14,6 +14,9 @@ from cfd_operator.data.collate import cfd_collate_fn
 from cfd_operator.data.dataset import CFDOperatorDataset
 from cfd_operator.data.file_dataset import load_dataset_payload
 from cfd_operator.data.normalization import StandardNormalizer
+from cfd_operator.data.airfrans import AirfRANSDatasetConverter
+from cfd_operator.data.airfrans_original import AirfRANSOriginalDatasetConverter
+from cfd_operator.data.quality import validate_dataset_payload
 from cfd_operator.data.synthetic import SyntheticAirfoilDatasetGenerator
 from cfd_operator.utils.io import ensure_dir
 
@@ -59,6 +62,14 @@ class CFDDataModule:
             ensure_dir(dataset_path.parent)
             generator = SyntheticAirfoilDatasetGenerator(config=self.config)
             return generator.save(dataset_path)
+        if self.config.dataset_type == "airfrans" and not dataset_path.exists():
+            ensure_dir(dataset_path.parent)
+            converter = AirfRANSDatasetConverter(config=self.config)
+            return converter.save(dataset_path)
+        if self.config.dataset_type == "airfrans_original" and not dataset_path.exists():
+            ensure_dir(dataset_path.parent)
+            converter = AirfRANSOriginalDatasetConverter(config=self.config)
+            return converter.save(dataset_path)
         if self.config.dataset_type == "file" and not dataset_path.exists():
             raise FileNotFoundError(f"Dataset file not found: {dataset_path}")
         return dataset_path
@@ -66,6 +77,17 @@ class CFDDataModule:
     def setup(self) -> None:
         dataset_path = self.prepare_data()
         self.payload = load_dataset_payload(dataset_path)
+        if self.config.strict_quality_checks:
+            try:
+                validate_dataset_payload(self.payload, strict=True)
+            except ValueError:
+                if self.config.dataset_type != "synthetic":
+                    raise
+                generator = SyntheticAirfoilDatasetGenerator(config=self.config)
+                generator.save(dataset_path)
+                self.payload = load_dataset_payload(dataset_path)
+                validate_dataset_payload(self.payload, strict=True)
+
         train_indices = self.payload.get("train_indices")
         val_indices = self.payload.get("val_indices")
         test_indices = self.payload.get("test_indices")
@@ -79,11 +101,9 @@ class CFDDataModule:
             test_indices = indices[val_end:]
 
         self.normalizers = self._fit_normalizers(np.asarray(train_indices))
-        self.datasets = {
-            "train": self._make_dataset(np.asarray(train_indices)),
-            "val": self._make_dataset(np.asarray(val_indices)),
-            "test": self._make_dataset(np.asarray(test_indices)),
-        }
+        self.datasets = {}
+        for split_name, split_indices in self._discover_splits().items():
+            self.datasets[split_name] = self._make_dataset(np.asarray(split_indices))
 
     def _fit_normalizers(self, train_indices: np.ndarray) -> NormalizerBundle:
         assert self.payload is not None
@@ -127,10 +147,21 @@ class CFDDataModule:
             collate_fn=cfd_collate_fn,
         )
 
-    def test_dataloader(self, batch_size: int | None = None) -> DataLoader:
+    def test_dataloader(self, batch_size: int | None = None, split_name: str = "test") -> DataLoader:
         return DataLoader(
-            self.datasets["test"],
+            self.datasets[split_name],
             batch_size=batch_size or self.batch_size,
             shuffle=False,
             collate_fn=cfd_collate_fn,
         )
+
+    def available_splits(self) -> list[str]:
+        return sorted(self.datasets.keys())
+
+    def _discover_splits(self) -> dict[str, np.ndarray]:
+        assert self.payload is not None
+        split_mapping: dict[str, np.ndarray] = {}
+        for key, value in self.payload.items():
+            if key.endswith("_indices"):
+                split_mapping[key.removesuffix("_indices")] = np.asarray(value, dtype=np.int64)
+        return split_mapping

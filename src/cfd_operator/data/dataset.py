@@ -38,7 +38,11 @@ class CFDOperatorDataset(Dataset[dict[str, torch.Tensor]]):
         branch_inputs = self.payload["branch_inputs"][index].astype(np.float32)
         query_points = self.payload["query_points"][index].astype(np.float32)
         field_targets = self.payload["field_targets"][index].astype(np.float32)
+        farfield_mask = self.payload["farfield_mask"][index].astype(np.float32)
+        farfield_targets = self.payload["farfield_targets"][index].astype(np.float32)
         surface_points = self.payload["surface_points"][index].astype(np.float32)
+        surface_normals = self.payload["surface_normals"][index].astype(np.float32)
+        cp_reference = self.payload["cp_reference"][index].astype(np.float32)
         surface_cp = self.payload["surface_cp"][index].astype(np.float32)
         scalar_targets = self.payload["scalar_targets"][index].astype(np.float32)
 
@@ -55,8 +59,12 @@ class CFDOperatorDataset(Dataset[dict[str, torch.Tensor]]):
             "query_points": torch.from_numpy(self.coordinate_normalizer.transform(query_points)),
             "field_targets_raw": torch.from_numpy(field_targets),
             "field_targets": torch.from_numpy(self.field_normalizer.transform(field_targets)),
+            "farfield_mask": torch.from_numpy(farfield_mask),
+            "farfield_targets": torch.from_numpy(farfield_targets),
             "surface_points_raw": torch.from_numpy(surface_points),
             "surface_points": torch.from_numpy(self.coordinate_normalizer.transform(surface_points)),
+            "surface_normals": torch.from_numpy(surface_normals),
+            "cp_reference": torch.from_numpy(cp_reference),
             "surface_cp": torch.from_numpy(surface_cp),
             "scalar_targets_raw": torch.from_numpy(scalar_targets),
             "scalar_targets": torch.from_numpy(self.scalar_normalizer.transform(scalar_targets)),
@@ -66,4 +74,3 @@ class CFDOperatorDataset(Dataset[dict[str, torch.Tensor]]):
             "convergence_flag": torch.tensor(self.payload["convergence_flag"][index], dtype=torch.long),
         }
         return sample
-

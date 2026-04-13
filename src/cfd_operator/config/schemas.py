@@ -28,12 +28,20 @@ class NormalizationConfig(BaseModel):
 
 class DataConfig(BaseModel):
     name: str = "toy_airfoil"
-    dataset_type: Literal["synthetic", "file"] = "synthetic"
+    dataset_type: Literal["synthetic", "file", "airfrans", "airfrans_original"] = "synthetic"
     dataset_path: str = "outputs/data/toy_airfoil_dataset.npz"
+    airfrans_root: str = "outputs/data/airfrans_raw"
+    airfrans_archive_path: str = "outputs/data/AirfRANS_original.tar"
+    airfrans_task: Literal["full", "scarce", "reynolds", "aoa"] = "full"
+    airfrans_download: bool = True
+    airfrans_unzip: bool = True
+    airfrans_max_samples: Optional[int] = None
     train_ratio: float = 0.7
     val_ratio: float = 0.15
     test_ratio: float = 0.15
     num_samples: int = 160
+    num_geometries: int = 20
+    conditions_per_geometry: int = 8
     num_query_points: int = 192
     num_surface_points: int = 96
     mach_range: Tuple[float, float] = (0.2, 0.78)
@@ -42,12 +50,23 @@ class DataConfig(BaseModel):
     include_reynolds: bool = False
     branch_feature_mode: Literal["params", "points"] = "params"
     low_fidelity_enabled: bool = False
+    unseen_geometry_ratio: float = 0.15
+    unseen_condition_ratio: float = 0.15
+    strict_quality_checks: bool = True
 
     @model_validator(mode="after")
     def validate_ratios(self) -> "DataConfig":
         total = self.train_ratio + self.val_ratio + self.test_ratio
         if abs(total - 1.0) > 1.0e-6:
             raise ValueError("train_ratio + val_ratio + test_ratio must equal 1.0")
+        if self.num_geometries <= 0:
+            raise ValueError("num_geometries must be positive")
+        if self.conditions_per_geometry <= 0:
+            raise ValueError("conditions_per_geometry must be positive")
+        if not (0.0 <= self.unseen_geometry_ratio < 0.5):
+            raise ValueError("unseen_geometry_ratio must be in [0, 0.5)")
+        if not (0.0 <= self.unseen_condition_ratio < 0.5):
+            raise ValueError("unseen_condition_ratio must be in [0, 0.5)")
         return self
 
 
@@ -96,7 +115,7 @@ class LossConfig(BaseModel):
     surface_weight: float = 0.5
     scalar_weight: float = 0.5
     physics_weight: float = 0.1
-    boundary_weight: float = 0.0
+    boundary_weight: float = 0.05
     field_loss_type: Literal["mse", "mae"] = "mse"
     scalar_loss_type: Literal["mse", "mae"] = "mse"
     use_physics: bool = True
@@ -109,6 +128,7 @@ class EvalConfig(BaseModel):
     save_plots: bool = True
     metrics_path: str = "outputs/eval/metrics.json"
     report_path: str = "outputs/eval/report.md"
+    split_name: str = "test"
 
 
 class ServeConfig(BaseModel):

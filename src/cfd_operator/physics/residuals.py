@@ -73,6 +73,48 @@ def momentum_residual(
     return residual_x, residual_y
 
 
+def x_momentum_residual(
+    rho: torch.Tensor,
+    u: torch.Tensor,
+    v: torch.Tensor,
+    p: torch.Tensor,
+    coords: torch.Tensor,
+    coord_scale: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
+    """Return only the x-momentum residual for the steady 2D Euler system."""
+
+    residual_x, _ = momentum_residual(
+        rho=rho,
+        u=u,
+        v=v,
+        p=p,
+        coords=coords,
+        coord_scale=coord_scale,
+    )
+    return residual_x
+
+
+def y_momentum_residual(
+    rho: torch.Tensor,
+    u: torch.Tensor,
+    v: torch.Tensor,
+    p: torch.Tensor,
+    coords: torch.Tensor,
+    coord_scale: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
+    """Return only the y-momentum residual for the steady 2D Euler system."""
+
+    _, residual_y = momentum_residual(
+        rho=rho,
+        u=u,
+        v=v,
+        p=p,
+        coords=coords,
+        coord_scale=coord_scale,
+    )
+    return residual_y
+
+
 def energy_residual(
     rho: torch.Tensor,
     u: torch.Tensor,

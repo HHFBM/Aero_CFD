@@ -32,7 +32,7 @@ def main() -> None:
         normalizers=predictor.normalizers,
         device=config.experiment.device,
     )
-    output_dir = Path(config.experiment.run_dir) / "eval"
+    output_dir = Path(config.experiment.run_dir) / "eval" / config.eval.split_name
     metrics = evaluator.evaluate(output_dir=output_dir)
     history_csv = Path(config.experiment.run_dir) / "reports" / "history.csv"
     if history_csv.exists() and config.eval.save_plots:

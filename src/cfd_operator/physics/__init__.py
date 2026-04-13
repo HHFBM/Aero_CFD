@@ -5,6 +5,8 @@ from .residuals import (
     compute_gradients,
     continuity_residual,
     momentum_residual,
+    x_momentum_residual,
+    y_momentum_residual,
 )
 
 __all__ = [
@@ -12,5 +14,6 @@ __all__ = [
     "compute_gradients",
     "continuity_residual",
     "momentum_residual",
+    "x_momentum_residual",
+    "y_momentum_residual",
 ]
-

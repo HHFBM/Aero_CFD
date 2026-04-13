@@ -1,0 +1,22 @@
+experiment:
+  name: sample_run
+  seed: 123
+  output_root: outputs
+  device: cpu
+
+data:
+  dataset_type: synthetic
+  dataset_path: outputs/data/toy_airfoil_dataset.npz
+  num_samples: 64
+  num_query_points: 128
+  num_surface_points: 80
+
+model:
+  name: deeponet
+  hidden_dim: 96
+  latent_dim: 96
+
+train:
+  epochs: 5
+  batch_size: 4
+

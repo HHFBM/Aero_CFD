@@ -1,0 +1,6 @@
+batch_size: 8
+num_visualization_samples: 3
+save_plots: true
+metrics_path: outputs/eval/metrics.json
+report_path: outputs/eval/report.md
+

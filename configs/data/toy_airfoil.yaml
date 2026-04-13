@@ -1,0 +1,20 @@
+name: toy_airfoil
+dataset_type: synthetic
+dataset_path: outputs/data/toy_airfoil_dataset.npz
+train_ratio: 0.7
+val_ratio: 0.15
+test_ratio: 0.15
+num_samples: 160
+num_query_points: 192
+num_surface_points: 96
+mach_range: [0.2, 0.78]
+aoa_range: [-2.0, 8.0]
+normalization:
+  branch: standard
+  coordinates: standard
+  fields: standard
+  scalars: standard
+include_reynolds: false
+branch_feature_mode: params
+low_fidelity_enabled: false
+

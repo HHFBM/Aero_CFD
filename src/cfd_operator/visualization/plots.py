@@ -91,8 +91,8 @@ def plot_surface_pressure(
         ax.plot(x, pressure_true, label="true", color="tab:blue")
     ax.plot(x, pressure_pred, label="pred" if pressure_true is not None else "value", color="tab:red")
     ax.set_xlabel("x")
-    ax.set_ylabel("Pressure")
-    ax.set_title("Surface pressure")
+    ax.set_ylabel("Raw pressure")
+    ax.set_title("Surface raw pressure")
     if pressure_true is not None:
         ax.legend()
     fig.savefig(save_path, bbox_inches="tight")

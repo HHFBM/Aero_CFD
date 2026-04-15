@@ -5,24 +5,33 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
+import warnings
 
 import numpy as np
 import torch
 
 from cfd_operator.config.schemas import ProjectConfig
 from cfd_operator.data.module import NormalizerBundle
-from cfd_operator.geometry import NACA4Airfoil, build_branch_features
-from cfd_operator.losses import pressure_to_cp
+from cfd_operator.geometry import (
+    GeometryInputError,
+    NACA4Airfoil,
+    build_branch_features,
+    resolve_geometry_input,
+)
+from cfd_operator.geometry.features import sample_surface_signature_from_points
+from cfd_operator.geometry.preprocess import CanonicalGeometry2D, maybe_warn_geometry_adapter
+from cfd_operator.geometry.semantics import build_inference_geometry_semantics
 from cfd_operator.models import create_model
+from cfd_operator.output_semantics import build_output_semantics, default_scalar_names
 from cfd_operator.postprocess import (
     build_slice_points,
     compute_gradient_indicators,
-    compute_surface_cp,
     compute_surface_heat_flux,
-    compute_surface_pressure,
     compute_wall_shear,
     estimate_shock_location,
     export_analysis_bundle,
+    resolve_pressure_channel,
+    resolve_surface_cp,
 )
 from cfd_operator.visualization import (
     plot_field_scatter,
@@ -91,6 +100,11 @@ class Predictor:
             scalar_names[index]: float(predicted_scalars[index])
             for index in range(min(len(predicted_scalars), len(scalar_names)))
         }
+        semantics = build_output_semantics(
+            field_names=list(self.config.data.field_names),
+            pressure_target_mode=self.config.data.pressure_target_mode,
+            scalar_names=scalar_names,
+        )
 
         result: Dict[str, Any] = {
             "query_points": query_points_raw,
@@ -101,6 +115,8 @@ class Predictor:
                 "field_names": list(self.config.data.field_names),
                 "scalar_names": scalar_names[: len(predicted_scalars)],
                 "pressure_target_mode": self.config.data.pressure_target_mode,
+                "pressure_semantics": semantics["pressure"],
+                "task_semantics": semantics["tasks"],
                 "flow_conditions": {
                     "mach": float(flow_conditions[0]),
                     "aoa": float(flow_conditions[1]),
@@ -147,7 +163,7 @@ class Predictor:
 
     def predict_from_geometry(
         self,
-        geometry_params: np.ndarray,
+        geometry_params: Optional[np.ndarray],
         mach: float,
         aoa_deg: float,
         query_points: np.ndarray,
@@ -160,25 +176,32 @@ class Predictor:
         include_slices: bool = True,
         include_features: bool = True,
         export_dir: Optional[Union[str, Path]] = None,
+        geometry_mode: Optional[str] = None,
+        geometry_points: Optional[np.ndarray] = None,
+        upper_surface_points: Optional[np.ndarray] = None,
+        lower_surface_points: Optional[np.ndarray] = None,
     ) -> Dict[str, Any]:
-        if geometry_params.shape[0] < 3:
-            raise ValueError("geometry_params must contain at least [max_camber, camber_position, thickness]")
-        chord = float(geometry_params[3]) if geometry_params.shape[0] > 3 else 1.0
-        airfoil = NACA4Airfoil(
-            max_camber=float(geometry_params[0]),
-            camber_position=float(geometry_params[1]),
-            thickness=float(geometry_params[2]),
-            chord=chord,
-        )
-        branch_inputs = self._build_inference_branch_inputs(
-            airfoil=airfoil,
+        try:
+            canonical_geometry = resolve_geometry_input(
+                geometry_mode=geometry_mode,
+                geometry_params=geometry_params,
+                geometry_points=geometry_points,
+                upper_surface_points=upper_surface_points,
+                lower_surface_points=lower_surface_points,
+                num_points=self.config.data.num_surface_points,
+            )
+        except GeometryInputError as exc:
+            raise ValueError(str(exc)) from exc
+
+        branch_inputs, geometry_metadata = self._build_inference_branch_inputs(
+            canonical_geometry=canonical_geometry,
             mach=mach,
             aoa_deg=aoa_deg,
             reynolds=reynolds,
         )
         if surface_points is None:
-            surface_points = airfoil.surface_points(self.config.data.num_surface_points)
-        return self.predict(
+            surface_points = canonical_geometry.canonical_surface_points
+        result = self.predict(
             branch_inputs_raw=branch_inputs.astype(np.float32),
             query_points_raw=query_points.astype(np.float32),
             flow_conditions=(
@@ -193,16 +216,20 @@ class Predictor:
             include_surface=include_surface,
             include_slices=include_slices,
             include_features=include_features,
-            export_dir=export_dir,
+            export_dir=None,
         )
+        result["metadata"]["geometry_semantics"] = geometry_metadata
+        if export_dir is not None:
+            self.export_analysis_bundle(result, output_dir=export_dir)
+        return result
 
     def _build_inference_branch_inputs(
         self,
-        airfoil: NACA4Airfoil,
+        canonical_geometry: CanonicalGeometry2D,
         mach: float,
         aoa_deg: float,
         reynolds: Optional[float] = None,
-    ) -> np.ndarray:
+    ) -> tuple[np.ndarray, dict[str, str]]:
         """Build branch features compatible with the training-time branch schema.
 
         For the synthetic/NACA path we use the configured geometry encoder. For the raw
@@ -212,36 +239,94 @@ class Predictor:
         """
 
         expected_dim = int(self.normalizers.branch.mean.shape[0])
-        default_branch = build_branch_features(
-            airfoil,
-            mach=mach,
-            aoa_deg=aoa_deg,
-            reynolds=reynolds if self.config.data.include_reynolds else None,
-            mode=self.config.data.branch_feature_mode,
-        )
-        if default_branch.shape[0] == expected_dim:
-            return default_branch.astype(np.float32)
-
         flow_dim = 3 if self.config.data.include_reynolds else 2
-        signature_dim = expected_dim - flow_dim
+        flow = [mach, aoa_deg]
+        if self.config.data.include_reynolds and reynolds is not None:
+            flow.append(reynolds)
+        flow_array = np.asarray(flow, dtype=np.float32)
+
+        if canonical_geometry.airfoil is not None:
+            default_branch = build_branch_features(
+                canonical_geometry.airfoil,
+                mach=mach,
+                aoa_deg=aoa_deg,
+                reynolds=reynolds if self.config.data.include_reynolds else None,
+                mode=self.config.data.branch_feature_mode,
+            ).astype(np.float32)
+            if default_branch.shape[0] == expected_dim:
+                return default_branch, build_inference_geometry_semantics(
+                    geometry_mode=canonical_geometry.geometry_mode,
+                    geometry_representation="parameterized_geometry",
+                    branch_encoding_type="naca_parameter_vector_plus_flow",
+                    geometry_reconstructability=canonical_geometry.reconstructability,
+                    geometry_params_semantics=canonical_geometry.geometry_params_semantics,
+                    legacy_param_source="naca4_parameter_vector",
+                    notes="Runtime geometry was reconstructed from legacy NACA parameters.",
+                )
+
+        signature_dim = expected_dim - min(flow_array.shape[0], flow_dim)
         if signature_dim > 0 and signature_dim % 2 == 0:
             num_surface_points = signature_dim // 2
-            surface_points = airfoil.surface_points(num_surface_points)
-            if surface_points.shape[0] > num_surface_points:
-                indices = np.linspace(0, surface_points.shape[0] - 1, num_surface_points, dtype=np.int64)
-                surface_points = surface_points[indices]
-            elif surface_points.shape[0] < num_surface_points:
-                pad_count = num_surface_points - surface_points.shape[0]
-                surface_points = np.concatenate([surface_points, np.repeat(surface_points[-1:], pad_count, axis=0)], axis=0)
-            surface_signature = surface_points.reshape(-1).astype(np.float32)
-            flow = [mach, aoa_deg]
-            if self.config.data.include_reynolds and reynolds is not None:
-                flow.append(reynolds)
-            branch_inputs = np.concatenate([surface_signature, np.asarray(flow, dtype=np.float32)], axis=0)
+            surface_signature = sample_surface_signature_from_points(
+                canonical_geometry.normalized_surface_points,
+                num_points=num_surface_points,
+            )
+            branch_inputs = np.concatenate([surface_signature, flow_array[:2]], axis=0).astype(np.float32)
             if branch_inputs.shape[0] == expected_dim:
-                return branch_inputs.astype(np.float32)
+                maybe_warn_geometry_adapter(canonical_geometry.adapter_note)
+                return branch_inputs, build_inference_geometry_semantics(
+                    geometry_mode=canonical_geometry.geometry_mode,
+                    geometry_representation="sampled_surface_signature",
+                    branch_encoding_type="normalized_surface_signature_plus_flow",
+                    geometry_reconstructability=canonical_geometry.reconstructability,
+                    geometry_params_semantics=canonical_geometry.geometry_params_semantics,
+                    notes=(
+                        canonical_geometry.adapter_note
+                        or "Runtime geometry was encoded as a normalized sampled surface signature."
+                    ),
+                )
 
-        return default_branch.astype(np.float32)
+        geometry_params = None if canonical_geometry.geometry_params is None else np.asarray(canonical_geometry.geometry_params, dtype=np.float32).reshape(-1)
+        if geometry_params is not None and geometry_params.shape[0] + flow_array.shape[0] == expected_dim:
+            if canonical_geometry.airfoil is None and canonical_geometry.geometry_mode == "generic_surface_points":
+                maybe_warn_geometry_adapter(
+                    canonical_geometry.adapter_note
+                    or "Generic surface points were reduced to a coarse parameter summary for this checkpoint."
+                )
+            return np.concatenate([geometry_params, flow_array], axis=0).astype(np.float32), build_inference_geometry_semantics(
+                geometry_mode=canonical_geometry.geometry_mode,
+                geometry_representation=(
+                    "parameterized_geometry" if canonical_geometry.airfoil is not None else "geometry_summary"
+                ),
+                branch_encoding_type="parameter_vector_plus_flow_adapter",
+                geometry_reconstructability=canonical_geometry.reconstructability,
+                geometry_params_semantics=canonical_geometry.geometry_params_semantics,
+                notes=(
+                    canonical_geometry.adapter_note
+                    or "Runtime geometry was passed through a parameter-vector compatible adapter."
+                ),
+            )
+
+        if geometry_params is not None and geometry_params.shape[0] + 2 == expected_dim:
+            maybe_warn_geometry_adapter(canonical_geometry.adapter_note)
+            return np.concatenate([geometry_params, np.asarray([mach, aoa_deg], dtype=np.float32)], axis=0).astype(np.float32), build_inference_geometry_semantics(
+                geometry_mode=canonical_geometry.geometry_mode,
+                geometry_representation="geometry_summary",
+                branch_encoding_type="parameter_vector_plus_flow_adapter",
+                geometry_reconstructability=canonical_geometry.reconstructability,
+                geometry_params_semantics=canonical_geometry.geometry_params_semantics,
+                notes=(
+                    canonical_geometry.adapter_note
+                    or "Runtime geometry was adapted to a checkpoint that expects geometry summary plus [mach, aoa]."
+                ),
+            )
+
+        raise ValueError(
+            "Could not build branch_inputs for this checkpoint from the provided geometry input. "
+            "This usually means the checkpoint expects a legacy branch encoding that cannot be safely reconstructed "
+            "from the selected geometry_mode. Try legacy_naca_params for NACA-style checkpoints, or use a "
+            "surface-signature-compatible checkpoint for generic_surface_points inputs."
+        )
 
     def _predict_surface(
         self,
@@ -272,8 +357,8 @@ class Predictor:
             "wall_shear_surface": wall_shear_surface.astype(np.float32),
             "cp_reference": cp_reference_used.astype(np.float32),
             "availability": {
-                "cp_surface": "predicted/derived",
-                "pressure_surface": "predicted",
+                "cp_surface": "derived_from_pressure_channel_and_cp_reference",
+                "pressure_surface": "predicted_raw_pressure",
                 "velocity_surface": "predicted",
                 "nut_surface": "predicted for AirfRANS-style checkpoints; placeholder semantics for datasets that do not supervise the 4th field as nut",
                 "heat_flux_surface": "approximate_postprocess",
@@ -349,7 +434,7 @@ class Predictor:
         plot_field_scatter(
             points=np.asarray(result["query_points"], dtype=np.float32),
             values=np.asarray(result["predicted_fields"], dtype=np.float32)[:, 2],
-            title="Predicted pressure field",
+            title="Predicted raw pressure field",
             save_path=Path(output_dir) / "predicted_pressure_field.png",
         )
         plot_scalar_summary(result["predicted_scalars"], save_path=Path(output_dir) / "scalar_summary.png")
@@ -399,25 +484,35 @@ class Predictor:
         return np.asarray([1.0, max(0.5 * 1.4 * mach**2, 1.0e-4)], dtype=np.float32)
 
     def _scalar_names(self) -> tuple[str, ...]:
-        return ("cl", "cd", "cdp", "cdv", "clp", "clv", "cm")
+        return default_scalar_names()
 
     def _surface_cp_output(self, surface_fields: np.ndarray, cp_reference: np.ndarray) -> np.ndarray:
-        if self.config.data.pressure_target_mode == "cp_like":
-            return np.asarray(surface_fields[..., 2:3], dtype=np.float32)
-        pressure_surface = compute_surface_pressure(surface_fields=surface_fields)
-        return compute_surface_cp(surface_pressure=pressure_surface, cp_reference=cp_reference)
+        return resolve_surface_cp(
+            pressure_channel_values=np.asarray(surface_fields[..., 2:3], dtype=np.float32),
+            pressure_target_mode=self.config.data.pressure_target_mode,
+            cp_reference=cp_reference,
+        )
 
     def _surface_pressure_output(self, surface_fields: np.ndarray, cp_reference: np.ndarray) -> np.ndarray:
-        if self.config.data.pressure_target_mode != "cp_like":
-            return compute_surface_pressure(surface_fields=surface_fields)
-        cp_surface = np.asarray(surface_fields[..., 2:3], dtype=np.float32)
-        return compute_surface_pressure(surface_cp=cp_surface, cp_reference=cp_reference)
+        return resolve_pressure_channel(
+            pressure_channel_values=np.asarray(surface_fields[..., 2:3], dtype=np.float32),
+            pressure_target_mode=self.config.data.pressure_target_mode,
+            cp_reference=cp_reference,
+        )
 
     def _export_field_values(self, field_values: np.ndarray, cp_reference: Optional[np.ndarray]) -> np.ndarray:
         export_fields = np.asarray(field_values, dtype=np.float32).copy()
-        if self.config.data.pressure_target_mode == "cp_like" and cp_reference is not None:
-            export_fields[:, 2:3] = compute_surface_pressure(
-                surface_cp=export_fields[:, 2:3],
+        if self.config.data.pressure_target_mode == "cp_like":
+            if cp_reference is None:
+                warnings.warn(
+                    "pressure_target_mode='cp_like' but cp_reference is unavailable; "
+                    "exported predicted_fields[:, 2] remains a cp-like pressure quantity.",
+                    stacklevel=2,
+                )
+                return export_fields
+            export_fields[:, 2:3] = resolve_pressure_channel(
+                pressure_channel_values=export_fields[:, 2:3],
+                pressure_target_mode=self.config.data.pressure_target_mode,
                 cp_reference=cp_reference,
             )
         return export_fields

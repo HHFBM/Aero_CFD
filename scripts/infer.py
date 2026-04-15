@@ -5,7 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
-from typing import Any, Dict, Union
+from typing import Any, Dict, Optional, Union
 
 import numpy as np
 import yaml
@@ -65,11 +65,41 @@ def _default_query_points(num_x: int = 32, num_y: int = 24) -> np.ndarray:
     return np.stack([xx.reshape(-1), yy.reshape(-1)], axis=1).astype(np.float32)
 
 
-def _resolve_geometry_params(payload: Dict[str, Any]) -> np.ndarray:
+def _resolve_geometry_mode(payload: Dict[str, Any]) -> Optional[str]:
+    if payload.get("geometry_mode") is not None:
+        return str(payload["geometry_mode"])
+    if payload.get("geometry_points") is not None or payload.get("airfoil_surface_points") is not None:
+        return "generic_surface_points"
+    if payload.get("upper_surface_points") is not None or payload.get("lower_surface_points") is not None:
+        return "generic_surface_points"
+    if payload.get("geometry_params") is not None or payload.get("geometry") is not None:
+        return "legacy_naca_params"
+    return None
+
+
+def _resolve_geometry_params(payload: Dict[str, Any]) -> Optional[np.ndarray]:
     geometry = payload.get("geometry_params", payload.get("geometry"))
     if geometry is None:
-        raise ValueError("Input must provide 'geometry_params' (or legacy alias 'geometry').")
+        return None
     return np.asarray(geometry, dtype=np.float32)
+
+
+def _resolve_geometry_points(payload: Dict[str, Any]) -> Optional[np.ndarray]:
+    geometry_points = payload.get("geometry_points", payload.get("airfoil_surface_points"))
+    if geometry_points is None:
+        return None
+    return np.asarray(geometry_points, dtype=np.float32)
+
+
+def _validate_geometry_payload(payload: Dict[str, Any], geometry_mode: Optional[str]) -> None:
+    has_upper = payload.get("upper_surface_points") is not None
+    has_lower = payload.get("lower_surface_points") is not None
+    if has_upper != has_lower:
+        raise ValueError("upper_surface_points and lower_surface_points must be provided together.")
+    if geometry_mode == "legacy_naca_params" and payload.get("geometry_params") is None and payload.get("geometry") is None:
+        raise ValueError("geometry_mode='legacy_naca_params' requires geometry_params.")
+    if geometry_mode == "structured_param_vector" and payload.get("geometry_params") is None and payload.get("geometry") is None:
+        raise ValueError("geometry_mode='structured_param_vector' requires geometry_params.")
 
 
 def _resolve_aoa(payload: Dict[str, Any]) -> float:
@@ -113,9 +143,18 @@ def main() -> None:
 
     predictor = Predictor.from_checkpoint(args.checkpoint, device=args.device)
     payload = _load_input(args.input)
+    geometry_mode = _resolve_geometry_mode(payload)
     geometry_params = _resolve_geometry_params(payload)
+    geometry_points = _resolve_geometry_points(payload)
     aoa_deg = _resolve_aoa(payload)
     mach = _resolve_mach(payload)
+    if geometry_mode is None:
+        raise ValueError(
+            "Input must provide geometry_mode or enough geometry fields for inference: "
+            "geometry_params for legacy_naca_params, or geometry_points / upper_surface_points + lower_surface_points "
+            "for generic_surface_points."
+        )
+    _validate_geometry_payload(payload, geometry_mode)
     query_points = (
         np.asarray(payload["query_points"], dtype=np.float32)
         if payload.get("query_points") is not None
@@ -141,6 +180,18 @@ def main() -> None:
         include_slices=not args.no_slices,
         include_features=not args.no_features,
         export_dir=args.export_dir,
+        geometry_mode=geometry_mode,
+        geometry_points=geometry_points,
+        upper_surface_points=(
+            np.asarray(payload["upper_surface_points"], dtype=np.float32)
+            if payload.get("upper_surface_points") is not None
+            else None
+        ),
+        lower_surface_points=(
+            np.asarray(payload["lower_surface_points"], dtype=np.float32)
+            if payload.get("lower_surface_points") is not None
+            else None
+        ),
     )
     if "surface_predictions" not in result and not args.no_surface:
         print("surface outputs were requested but are unavailable for this input/checkpoint combination.")

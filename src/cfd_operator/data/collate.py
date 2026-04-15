@@ -23,6 +23,15 @@ def _pad_tensor_sequence(values: list[torch.Tensor], padding_value: float = 0.0)
 def cfd_collate_fn(batch: list[dict[str, Any]]) -> dict[str, Any]:
     collated: dict[str, Any] = {
         "airfoil_id": [item["airfoil_id"] for item in batch],
+        "geometry_mode": [item["geometry_mode"] for item in batch],
+        "geometry_source": [item["geometry_source"] for item in batch],
+        "geometry_representation": [item["geometry_representation"] for item in batch],
+        "branch_encoding_type": [item["branch_encoding_type"] for item in batch],
+        "geometry_reconstructability": [item["geometry_reconstructability"] for item in batch],
+        "geometry_params_semantics": [item["geometry_params_semantics"] for item in batch],
+        "legacy_param_source": [item["legacy_param_source"] for item in batch],
+        "geometry_encoding_meta": [item["geometry_encoding_meta"] for item in batch],
+        "surface_sampling_info": [item["surface_sampling_info"] for item in batch],
         "geometry_params": torch.stack([item["geometry_params"] for item in batch]),
         "flow_conditions": torch.stack([item["flow_conditions"] for item in batch]),
         "branch_inputs_raw": torch.stack([item["branch_inputs_raw"] for item in batch]),
@@ -43,6 +52,7 @@ def cfd_collate_fn(batch: list[dict[str, Any]]) -> dict[str, Any]:
     for key in [
         "query_points",
         "query_points_raw",
+        "geometry_points_raw",
         "field_targets",
         "field_targets_raw",
         "pressure_gradient_indicator",

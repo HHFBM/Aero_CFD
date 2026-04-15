@@ -11,6 +11,7 @@ from cfd_operator.config.schemas import DataConfig
 from cfd_operator.data.schemas import CFDSample
 from cfd_operator.data.splitting import build_generalization_splits
 from cfd_operator.geometry import NACA4Airfoil, build_branch_features
+from cfd_operator.geometry.semantics import synthetic_geometry_semantics
 from cfd_operator.utils.io import ensure_dir, save_json
 
 
@@ -174,6 +175,7 @@ class SyntheticAirfoilDatasetGenerator:
         rng = self._rng()
         geometries = self._build_geometry_pool(rng)
         auxiliary_field = self.config.field_names[3]
+        geometry_semantics = synthetic_geometry_semantics(branch_feature_mode=self.config.branch_feature_mode)
         samples: list[CFDSample] = []
         for geometry_index, airfoil in enumerate(geometries):
             for _ in range(self.config.conditions_per_geometry):
@@ -230,6 +232,16 @@ class SyntheticAirfoilDatasetGenerator:
                         fidelity_level=0,
                         source="synthetic_rule",
                         convergence_flag=1,
+                        geometry_mode=geometry_semantics.geometry_mode,
+                        geometry_source=geometry_semantics.geometry_source,
+                        geometry_representation=geometry_semantics.geometry_representation,
+                        branch_encoding_type=geometry_semantics.branch_encoding_type,
+                        geometry_reconstructability=geometry_semantics.geometry_reconstructability,
+                        geometry_params_semantics=geometry_semantics.geometry_params_semantics,
+                        legacy_param_source=geometry_semantics.legacy_param_source,
+                        geometry_points=surface_points,
+                        geometry_encoding_meta=geometry_semantics.as_json(),
+                        surface_sampling_info='{"source":"surface_points","ordering":"te-upper-le-lower-te","normalized":false}',
                     )
                 )
         return samples
@@ -262,6 +274,16 @@ class SyntheticAirfoilDatasetGenerator:
         payload = {
             "airfoil_id": np.asarray([sample.airfoil_id for sample in samples]),
             "geometry_params": np.stack([sample.geometry_params for sample in samples]),
+            "geometry_mode": np.asarray([sample.geometry_mode for sample in samples]),
+            "geometry_source": np.asarray([sample.geometry_source for sample in samples]),
+            "geometry_representation": np.asarray([sample.geometry_representation for sample in samples]),
+            "branch_encoding_type": np.asarray([sample.branch_encoding_type for sample in samples]),
+            "geometry_reconstructability": np.asarray([sample.geometry_reconstructability for sample in samples]),
+            "geometry_params_semantics": np.asarray([sample.geometry_params_semantics for sample in samples]),
+            "legacy_param_source": np.asarray([sample.legacy_param_source for sample in samples]),
+            "geometry_points": np.stack([sample.geometry_points for sample in samples]).reshape(num_samples, num_surface_points, 2),
+            "geometry_encoding_meta": np.asarray([sample.geometry_encoding_meta for sample in samples]),
+            "surface_sampling_info": np.asarray([sample.surface_sampling_info for sample in samples]),
             "flow_conditions": np.stack([sample.flow_conditions for sample in samples]),
             "branch_inputs": np.stack([sample.branch_inputs for sample in samples]).reshape(num_samples, branch_dim),
             "query_points": np.stack([sample.query_points for sample in samples]).reshape(num_samples, num_query_points, 2),

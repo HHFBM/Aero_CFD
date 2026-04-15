@@ -2,8 +2,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pandas as pd
+
 from cfd_operator.config.schemas import DataConfig
 from cfd_operator.data import CFDDataModule
+from cfd_operator.data.file_dataset import load_dataset_payload
 
 
 def test_data_module_builds_synthetic_dataset(tmp_path: Path) -> None:
@@ -26,6 +29,8 @@ def test_data_module_builds_synthetic_dataset(tmp_path: Path) -> None:
     assert batch["surface_cp"].shape[-1] == 1
     assert batch["surface_normals"].shape[-1] == 2
     assert batch["farfield_targets"].shape[-1] == 4
+    assert "geometry_mode" in batch
+    assert batch["geometry_mode"][0] == "legacy_naca_params"
     assert "test_unseen_geometry" in data_module.available_splits()
     assert "test_unseen_condition" in data_module.available_splits()
 
@@ -47,3 +52,71 @@ def test_unseen_geometry_split_is_disjoint(tmp_path: Path) -> None:
     train_ids = set(airfoil_ids[data_module.payload["train_indices"]].tolist())
     unseen_ids = set(airfoil_ids[data_module.payload["test_unseen_geometry_indices"]].tolist())
     assert train_ids.isdisjoint(unseen_ids)
+
+
+def test_file_dataset_generic_geometry_requires_branch_encoding(tmp_path: Path) -> None:
+    frame = pd.DataFrame(
+        {
+            "sample_id": [0, 0, 0, 0],
+            "geometry_mode": ["generic_surface_points"] * 4,
+            "geometry_x": [1.0, 0.5, 0.0, 0.5],
+            "geometry_y": [0.0, 0.1, 0.0, -0.1],
+            "mach": [0.3] * 4,
+            "aoa": [2.0] * 4,
+            "x": [0.0, 0.2, 0.4, 0.6],
+            "y": [0.0, 0.1, 0.0, -0.1],
+            "u": [1.0, 1.0, 1.0, 1.0],
+            "v": [0.0, 0.0, 0.0, 0.0],
+            "p": [1.0, 1.0, 1.0, 1.0],
+            "surface_flag": [1, 1, 1, 1],
+            "cp": [0.0, 0.0, 0.0, 0.0],
+            "cl": [0.1] * 4,
+            "cd": [0.01] * 4,
+            "fidelity_level": [0] * 4,
+            "source": ["generic_tabular"] * 4,
+            "convergence_flag": [1] * 4,
+        }
+    )
+    path = tmp_path / "generic.csv"
+    frame.to_csv(path, index=False)
+
+    try:
+        load_dataset_payload(path)
+    except ValueError as exc:
+        assert "branch_* columns" in str(exc)
+    else:
+        raise AssertionError("Expected generic tabular dataset without branch encoding to raise a clear error.")
+
+
+def test_file_dataset_generic_geometry_with_precomputed_branch_loads(tmp_path: Path) -> None:
+    frame = pd.DataFrame(
+        {
+            "sample_id": [0, 0, 0, 0],
+            "geometry_mode": ["generic_surface_points"] * 4,
+            "geometry_x": [1.0, 0.5, 0.0, 0.5],
+            "geometry_y": [0.0, 0.1, 0.0, -0.1],
+            "branch_0": [0.1] * 4,
+            "branch_1": [0.2] * 4,
+            "branch_2": [0.3] * 4,
+            "branch_3": [0.4] * 4,
+            "mach": [0.3] * 4,
+            "aoa": [2.0] * 4,
+            "x": [0.0, 0.2, 0.4, 0.6],
+            "y": [0.0, 0.1, 0.0, -0.1],
+            "u": [1.0, 1.0, 1.0, 1.0],
+            "v": [0.0, 0.0, 0.0, 0.0],
+            "p": [1.0, 1.0, 1.0, 1.0],
+            "surface_flag": [1, 1, 1, 1],
+            "cp": [0.0, 0.0, 0.0, 0.0],
+            "cl": [0.1] * 4,
+            "cd": [0.01] * 4,
+            "fidelity_level": [0] * 4,
+            "source": ["generic_tabular"] * 4,
+            "convergence_flag": [1] * 4,
+        }
+    )
+    path = tmp_path / "generic_with_branch.csv"
+    frame.to_csv(path, index=False)
+    payload = load_dataset_payload(path)
+    assert payload["geometry_mode"][0] == "generic_surface_points"
+    assert payload["branch_inputs"].shape == (1, 4)

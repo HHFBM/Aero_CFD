@@ -19,6 +19,7 @@ from cfd_operator.data.airfrans import AirfRANSDatasetConverter
 from cfd_operator.data.airfrans_original import AirfRANSOriginalDatasetConverter
 from cfd_operator.data.quality import validate_dataset_payload
 from cfd_operator.data.synthetic import SyntheticAirfoilDatasetGenerator
+from cfd_operator.geometry.semantics import ensure_geometry_payload_metadata
 from cfd_operator.utils.io import ensure_dir
 
 
@@ -78,6 +79,10 @@ class CFDDataModule:
     def setup(self) -> None:
         dataset_path = self.prepare_data()
         self.payload = load_dataset_payload(dataset_path)
+        self.payload = ensure_geometry_payload_metadata(
+            self.payload,
+            branch_feature_mode=self.config.branch_feature_mode,
+        )
         self.payload = ensure_analysis_payload(self.payload)
         if self.config.strict_quality_checks:
             try:

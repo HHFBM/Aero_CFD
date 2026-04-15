@@ -26,6 +26,16 @@ class CFDSample:
     fidelity_level: int
     source: str
     convergence_flag: int
+    geometry_mode: str = "legacy_naca_params"
+    geometry_source: str = "runtime_input"
+    geometry_representation: str = "parameterized_geometry"
+    branch_encoding_type: str = "unknown"
+    geometry_reconstructability: str = "unknown"
+    geometry_params_semantics: str = "unknown"
+    legacy_param_source: str = "none"
+    geometry_points: np.ndarray | None = None
+    geometry_encoding_meta: str | None = None
+    surface_sampling_info: str | None = None
     surface_arc_length: np.ndarray | None = None
     surface_pressure: np.ndarray | None = None
     surface_velocity: np.ndarray | None = None
@@ -49,6 +59,20 @@ class CFDSample:
             "branch_inputs": self.branch_inputs.astype(np.float32),
             "query_points": self.query_points.astype(np.float32),
             "field_targets": self.field_targets.astype(np.float32),
+            "geometry_mode": self.geometry_mode,
+            "geometry_source": self.geometry_source,
+            "geometry_representation": self.geometry_representation,
+            "branch_encoding_type": self.branch_encoding_type,
+            "geometry_reconstructability": self.geometry_reconstructability,
+            "geometry_params_semantics": self.geometry_params_semantics,
+            "legacy_param_source": self.legacy_param_source,
+            "geometry_points": (
+                self.geometry_points.astype(np.float32)
+                if self.geometry_points is not None
+                else self.surface_points.astype(np.float32)
+            ),
+            "geometry_encoding_meta": self.geometry_encoding_meta or "",
+            "surface_sampling_info": self.surface_sampling_info or "",
             "farfield_mask": self.farfield_mask.astype(np.float32),
             "farfield_targets": self.farfield_targets.astype(np.float32),
             "surface_points": self.surface_points.astype(np.float32),

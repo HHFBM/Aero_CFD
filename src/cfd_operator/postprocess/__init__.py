@@ -10,6 +10,8 @@ from .analysis import (
     compute_wall_shear,
     estimate_shock_location,
     extract_slice_field,
+    resolve_pressure_channel,
+    resolve_surface_cp,
 )
 from .export import export_analysis_bundle
 
@@ -24,4 +26,6 @@ __all__ = [
     "estimate_shock_location",
     "export_analysis_bundle",
     "extract_slice_field",
+    "resolve_pressure_channel",
+    "resolve_surface_cp",
 ]

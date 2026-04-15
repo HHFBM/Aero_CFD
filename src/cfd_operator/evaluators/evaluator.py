@@ -13,17 +13,22 @@ import torch
 from cfd_operator.config.schemas import EvalConfig
 from cfd_operator.data.module import CFDDataModule, NormalizerBundle
 from cfd_operator.evaluators.metrics import (
-    binary_accuracy,
-    binary_f1,
-    binary_iou,
     mae,
-    mse,
-    relative_error,
-    rmse,
+    compute_feature_metrics,
+    compute_field_metrics,
+    compute_scalar_metrics,
+    compute_slice_metrics,
+    compute_surface_metrics,
 )
-from cfd_operator.losses import pressure_to_cp
 from cfd_operator.models.base import BaseOperatorModel
-from cfd_operator.postprocess import compute_gradient_indicators, estimate_shock_location, export_analysis_bundle
+from cfd_operator.output_semantics import build_output_semantics, flatten_metric_groups
+from cfd_operator.postprocess import (
+    compute_gradient_indicators,
+    estimate_shock_location,
+    export_analysis_bundle,
+    resolve_pressure_channel,
+    resolve_surface_cp,
+)
 from cfd_operator.utils.io import save_json
 from cfd_operator.visualization import (
     plot_field_scatter,
@@ -55,6 +60,7 @@ class Evaluator:
 
         plot_paths: list[str] = []
         exported_files: list[str] = []
+        metric_groups: dict[str, dict[str, float]] = {}
 
         field_true_all: list[np.ndarray] = []
         field_pred_all: list[np.ndarray] = []
@@ -88,16 +94,27 @@ class Evaluator:
 
                 surface_outputs = self.model.loss_outputs(batch["branch_inputs"], batch["surface_points"])
                 surface_fields = self.normalizers.fields.inverse_transform_tensor(surface_outputs["fields"])
-                if self.data_module.config.pressure_target_mode == "cp_like":
-                    cp_pred = surface_fields[..., 2:3].cpu().numpy()
-                    cp_reference_np = batch["cp_reference"].cpu().numpy()[:, None, :]
-                    surface_pressure_pred = (
-                        cp_reference_np[..., 0:1] + cp_pred * np.clip(cp_reference_np[..., 1:2], a_min=1.0e-4, a_max=None)
-                    )
-                else:
-                    surface_pressure_pred = surface_fields[..., 2:3].cpu().numpy()
-                    cp_reference = batch["cp_reference"].unsqueeze(1)
-                    cp_pred = pressure_to_cp(surface_fields[..., 2:3], cp_reference=cp_reference).cpu().numpy()
+                cp_reference_np = batch["cp_reference"].cpu().numpy()
+                cp_pred = np.stack(
+                    [
+                        resolve_surface_cp(
+                            pressure_channel_values=surface_fields[batch_index, :, 2:3].cpu().numpy(),
+                            pressure_target_mode=self.data_module.config.pressure_target_mode,
+                            cp_reference=cp_reference_np[batch_index],
+                        )
+                        for batch_index in range(surface_fields.shape[0])
+                    ]
+                )
+                surface_pressure_pred = np.stack(
+                    [
+                        resolve_pressure_channel(
+                            pressure_channel_values=surface_fields[batch_index, :, 2:3].cpu().numpy(),
+                            pressure_target_mode=self.data_module.config.pressure_target_mode,
+                            cp_reference=cp_reference_np[batch_index],
+                        )
+                        for batch_index in range(surface_fields.shape[0])
+                    ]
+                )
                 surface_pressure_true = batch["surface_pressure"].cpu().numpy()
                 cp_true = batch["surface_cp"].cpu().numpy()
 
@@ -164,6 +181,11 @@ class Evaluator:
                         field_names = list(self.data_module.config.field_names)
 
                         if self.config.export_analysis:
+                            semantics = build_output_semantics(
+                                field_names=field_names,
+                                pressure_target_mode=self.data_module.config.pressure_target_mode,
+                                scalar_names=("cl", "cd"),
+                            )
                             analysis_payload = {
                                 "query_points": batch["query_points_raw"][local_index].cpu().numpy(),
                                 "predicted_fields": field_pred[local_index],
@@ -199,6 +221,9 @@ class Evaluator:
                                 "metadata": {
                                     "field_names": field_names,
                                     "scalar_names": ["cl", "cd"],
+                                    "pressure_target_mode": self.data_module.config.pressure_target_mode,
+                                    "pressure_semantics": semantics["pressure"],
+                                    "task_semantics": semantics["tasks"],
                                     "source": "evaluation_export",
                                 },
                             }
@@ -207,6 +232,7 @@ class Evaluator:
                                 [
                                     str(sample_dir / "predictions.json"),
                                     str(sample_dir / "scalar_summary.json"),
+                                    str(sample_dir / "task_semantics.json"),
                                     str(sample_dir / "surface_values.csv"),
                                     str(sample_dir / "slice_values.csv"),
                                     str(sample_dir / "feature_summary.json"),
@@ -218,14 +244,14 @@ class Evaluator:
                             plot_field_scatter(
                                 sample_points,
                                 field_true[local_index, :, 2],
-                                title=f"True pressure sample {saved_samples}",
+                                title=f"True raw pressure sample {saved_samples}",
                                 save_path=sample_dir / "field_true_pressure.png",
                             )
                             plot_paths.append(str(sample_dir / "field_true_pressure.png"))
                             plot_field_scatter(
                                 sample_points,
                                 field_pred[local_index, :, 2],
-                                title=f"Pred pressure sample {saved_samples}",
+                                title=f"Pred raw pressure sample {saved_samples}",
                                 save_path=sample_dir / "field_pred_pressure.png",
                             )
                             plot_paths.append(str(sample_dir / "field_pred_pressure.png"))
@@ -289,33 +315,36 @@ class Evaluator:
         shock_location_pred_np = np.stack(shock_location_pred_all)
         shock_location_valid = np.isfinite(shock_location_true_np).all(axis=1) & np.isfinite(shock_location_pred_np).all(axis=1)
 
-        metrics = {
-            "field_mse": mse(field_true_np, field_pred_np),
-            "field_rmse": rmse(field_true_np, field_pred_np),
-            "field_relative_error": relative_error(field_true_np, field_pred_np),
-            "cp_surface_rmse": rmse(cp_true_np, cp_pred_np),
-            "cp_surface_mae": mae(cp_true_np, cp_pred_np),
-            "pressure_surface_rmse": rmse(pressure_true_np, pressure_pred_np),
-            "slice_rmse": rmse(slice_true_np, slice_pred_np),
-            "slice_relative_error": relative_error(slice_true_np, slice_pred_np),
-            "cl_mae": mae(scalar_true_np[:, 0], scalar_pred_np[:, 0]),
-            "cl_relative_error": relative_error(scalar_true_np[:, 0], scalar_pred_np[:, 0]),
-            "cd_mae": mae(scalar_true_np[:, 1], scalar_pred_np[:, 1]),
-            "cd_relative_error": relative_error(scalar_true_np[:, 1], scalar_pred_np[:, 1]),
-            f"{self.data_module.config.field_names[3]}_rmse": rmse(field_true_np[:, 3], field_pred_np[:, 3]),
-            "pressure_gradient_indicator_accuracy": binary_accuracy(pressure_gradient_true_np, pressure_gradient_pred_np),
-            "pressure_gradient_indicator_f1": binary_f1(pressure_gradient_true_np, pressure_gradient_pred_np),
-            "pressure_gradient_indicator_iou": binary_iou(pressure_gradient_true_np, pressure_gradient_pred_np),
-            "high_gradient_accuracy": binary_accuracy(high_true_np, high_pred_np),
-            "high_gradient_iou": binary_iou(high_true_np, high_pred_np),
-            "pressure_gradient_pred_fraction": float(np.mean(pressure_gradient_pred_np >= 0.5)),
-            "high_gradient_pred_fraction": float(np.mean(high_pred_np >= 0.5)),
-        }
+        metric_groups["field_metrics"] = compute_field_metrics(
+            field_true_np,
+            field_pred_np,
+            aux_name=str(self.data_module.config.field_names[3]),
+        )
+        metric_groups["scalar_metrics"] = compute_scalar_metrics(
+            scalar_true_np,
+            scalar_pred_np,
+            scalar_names=("cl", "cd"),
+        )
+        metric_groups["surface_metrics"] = compute_surface_metrics(
+            cp_true_np,
+            cp_pred_np,
+            pressure_true_np,
+            pressure_pred_np,
+        )
+        metric_groups["slice_metrics"] = compute_slice_metrics(slice_true_np, slice_pred_np)
+        metric_groups["feature_metrics"] = compute_feature_metrics(
+            pressure_gradient_true_np,
+            pressure_gradient_pred_np,
+            high_true_np,
+            high_pred_np,
+        )
+        metrics = flatten_metric_groups(metric_groups)
         if np.any(shock_location_valid):
             metrics["shock_location_mae"] = mae(
                 shock_location_true_np[shock_location_valid],
                 shock_location_pred_np[shock_location_valid],
             )
+            metric_groups.setdefault("feature_metrics", {})["shock_location_mae"] = metrics["shock_location_mae"]
 
         if self.config.save_plots:
             plot_scalar_scatter(
@@ -338,37 +367,52 @@ class Evaluator:
                 plot_paths.append(str(output_dir / "loss_curve.png"))
 
         save_json(output_dir / "metrics.json", metrics)
-        self._write_report(output_dir=output_dir, metrics=metrics, plot_paths=plot_paths, exported_files=exported_files)
+        self._write_report(
+            output_dir=output_dir,
+            metrics=metrics,
+            metric_groups=metric_groups,
+            plot_paths=plot_paths,
+            exported_files=exported_files,
+        )
         return metrics
 
     def _write_report(
         self,
         output_dir: Path,
         metrics: dict[str, float],
+        metric_groups: dict[str, dict[str, float]],
         plot_paths: list[str],
         exported_files: list[str],
     ) -> None:
         report_path = output_dir / "report.md"
         report_json_path = output_dir / "report.json"
+        semantics = build_output_semantics(
+            field_names=list(self.data_module.config.field_names),
+            pressure_target_mode=self.data_module.config.pressure_target_mode,
+            scalar_names=("cl", "cd"),
+        )
         lines = [
             "# Evaluation Report",
             "",
             "## Metrics",
             "",
         ]
-        for key, value in metrics.items():
-            lines.append(f"- {key}: {value:.6f}")
+        for group_name, group_metrics in metric_groups.items():
+            lines.append(f"### {group_name}")
+            lines.append("")
+            for key, value in group_metrics.items():
+                lines.append(f"- {key}: {value:.6f}")
+            lines.append("")
         lines.extend(
             [
-                "",
                 "## Notes",
                 "",
                 "- Field outputs and scalar outputs are direct model predictions.",
-                "- Surface pressure is predicted via surface-point field evaluation.",
-                "- Surface Cp is derived from predicted surface pressure and Cp reference.",
-                "- Heat flux and wall shear remain approximate postprocessing proxies and are not benchmark metrics.",
-                "- Shock/high-gradient indicators use a feature head when available, otherwise gradient-based postprocessing.",
-                "- High-gradient metrics are derived-label analysis metrics, not official AirfRANS benchmarks.",
+                f"- Pressure channel semantics: {semantics['pressure']['training_pressure_description']}",
+                "- Exported pressure metrics always use raw pressure after any needed cp_like reconstruction.",
+                "- Surface Cp metrics always use Cp reconstructed from the surface pressure channel and Cp reference.",
+                "- Heat flux and wall shear remain placeholder/experimental proxies and are not benchmark metrics.",
+                "- Feature metrics mix explicit feature-head outputs and derived gradient indicators, depending on checkpoint capability.",
                 f"- Evaluated split: `{self.config.split_name}`.",
             ]
         )
@@ -391,6 +435,9 @@ class Evaluator:
                     "split_name": self.config.split_name,
                 },
                 "metrics": metrics,
+                "metric_groups": metric_groups,
+                "task_semantics": semantics["tasks"],
+                "pressure_semantics": semantics["pressure"],
                 "plots": plot_paths,
                 "exports": exported_files,
             },

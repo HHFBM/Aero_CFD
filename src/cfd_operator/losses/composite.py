@@ -59,6 +59,13 @@ def pressure_to_cp(
 
 @dataclass
 class CompositeLoss:
+    """Multi-task loss with explicit pressure-channel semantics.
+
+    ``pressure_target_mode`` controls field channel 2:
+    - ``raw``: channel 2 stores raw pressure
+    - ``cp_like``: channel 2 stores a Cp-like quantity ``(p - p_ref) / q_ref``
+    """
+
     config: LossConfig
     normalizers: NormalizerBundle
     field_names: tuple[str, ...] = ("u", "v", "p", "rho")
@@ -141,6 +148,7 @@ class CompositeLoss:
         )
 
     def _surface_cp_prediction(self, surface_fields: torch.Tensor, batch: dict[str, Any]) -> torch.Tensor:
+        # Field channel 2 is pressure-like. Convert it to surface Cp using the configured semantics.
         pressure_like = surface_fields[..., 2:3]
         if self.pressure_target_mode == "cp_like":
             return pressure_like
@@ -148,6 +156,7 @@ class CompositeLoss:
         return pressure_to_cp(pressure=pressure_like, cp_reference=cp_reference)
 
     def _surface_pressure_prediction(self, surface_fields: torch.Tensor, batch: dict[str, Any]) -> torch.Tensor:
+        # Export/evaluation pressure metrics always use raw pressure, even if the training target is cp_like.
         pressure_like = surface_fields[..., 2:3]
         if self.pressure_target_mode != "cp_like":
             return pressure_like

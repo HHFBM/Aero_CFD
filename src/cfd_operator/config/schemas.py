@@ -1,4 +1,9 @@
-"""Typed configuration models."""
+"""Typed configuration models.
+
+Descriptions intentionally call out which knobs affect supervised, derived or
+placeholder/experimental outputs so the YAML remains readable even without a
+separate schema browser.
+"""
 
 from __future__ import annotations
 
@@ -48,9 +53,24 @@ class DataConfig(BaseModel):
     aoa_range: Tuple[float, float] = (-2.0, 8.0)
     normalization: NormalizationConfig = Field(default_factory=NormalizationConfig)
     include_reynolds: bool = False
-    branch_feature_mode: Literal["params", "points"] = "params"
-    field_names: Tuple[str, str, str, str] = ("u", "v", "p", "rho")
-    pressure_target_mode: Literal["raw", "cp_like"] = "raw"
+    branch_feature_mode: Literal["params", "points"] = Field(
+        default="params",
+        description=(
+            "Geometry encoding mode for parameterized geometry helpers. "
+            "This does not override dataset-specific encoders such as the raw AirfRANS surface-signature path."
+        ),
+    )
+    field_names: Tuple[str, str, str, str] = Field(
+        default=("u", "v", "p", "rho"),
+        description="Supervised pointwise field names. The third channel is always the pressure-like channel.",
+    )
+    pressure_target_mode: Literal["raw", "cp_like"] = Field(
+        default="raw",
+        description=(
+            "'raw' means field channel 2 stores raw pressure. "
+            "'cp_like' means field channel 2 stores a Cp-like pressure quantity (p - p_ref) / q_ref."
+        ),
+    )
     low_fidelity_enabled: bool = False
     unseen_geometry_ratio: float = 0.15
     unseen_condition_ratio: float = 0.15
@@ -69,6 +89,10 @@ class DataConfig(BaseModel):
             raise ValueError("unseen_geometry_ratio must be in [0, 0.5)")
         if not (0.0 <= self.unseen_condition_ratio < 0.5):
             raise ValueError("unseen_condition_ratio must be in [0, 0.5)")
+        if len(self.field_names) != 4:
+            raise ValueError("field_names must contain exactly four entries: [u, v, pressure_like, aux].")
+        if self.field_names[2] not in {"p", "pressure"}:
+            raise ValueError("field_names[2] must describe the pressure-like channel, typically 'p'.")
         return self
 
 
@@ -114,17 +138,17 @@ class TrainConfig(BaseModel):
 
 
 class LossConfig(BaseModel):
-    field_weight: float = 1.0
-    surface_weight: float = 0.5
-    surface_pressure_weight: float = 0.0
-    heat_flux_weight: float = 0.0
-    wall_shear_weight: float = 0.0
-    scalar_weight: float = 0.5
-    slice_weight: float = 0.0
-    feature_weight: float = 0.0
-    shock_location_weight: float = 0.0
-    physics_weight: float = 0.1
-    boundary_weight: float = 0.05
+    field_weight: float = Field(default=1.0, description="Weight for supervised pointwise field loss.")
+    surface_weight: float = Field(default=0.5, description="Weight for derived/supervised surface Cp loss.")
+    surface_pressure_weight: float = Field(default=0.0, description="Weight for supervised surface-pressure loss.")
+    heat_flux_weight: float = Field(default=0.0, description="Weight for placeholder heat-flux proxy loss.")
+    wall_shear_weight: float = Field(default=0.0, description="Weight for placeholder wall-shear proxy loss.")
+    scalar_weight: float = Field(default=0.5, description="Weight for supervised scalar loss.")
+    slice_weight: float = Field(default=0.0, description="Weight for derived slice loss sampled from fields.")
+    feature_weight: float = Field(default=0.0, description="Weight for derived feature-loss terms.")
+    shock_location_weight: float = Field(default=0.0, description="Weight for experimental shock-location loss.")
+    physics_weight: float = Field(default=0.1, description="Weight for physics regularization loss.")
+    boundary_weight: float = Field(default=0.05, description="Weight for boundary consistency loss.")
     field_loss_type: Literal["mse", "mae"] = "mse"
     scalar_loss_type: Literal["mse", "mae"] = "mse"
     surface_loss_type: Literal["mse", "mae"] = "mse"
@@ -137,6 +161,22 @@ class LossConfig(BaseModel):
     use_shock_location_loss: bool = False
     use_physics: bool = True
     use_energy_residual: bool = False
+
+    @model_validator(mode="after")
+    def validate_loss_flags(self) -> "LossConfig":
+        weighted_flags = [
+            ("use_surface_pressure_loss", self.use_surface_pressure_loss, "surface_pressure_weight", self.surface_pressure_weight),
+            ("use_heat_flux_loss", self.use_heat_flux_loss, "heat_flux_weight", self.heat_flux_weight),
+            ("use_wall_shear_loss", self.use_wall_shear_loss, "wall_shear_weight", self.wall_shear_weight),
+            ("use_slice_loss", self.use_slice_loss, "slice_weight", self.slice_weight),
+            ("use_feature_loss", self.use_feature_loss, "feature_weight", self.feature_weight),
+            ("use_shock_location_loss", self.use_shock_location_loss, "shock_location_weight", self.shock_location_weight),
+            ("use_physics", self.use_physics, "physics_weight", self.physics_weight),
+        ]
+        for flag_name, enabled, weight_name, weight in weighted_flags:
+            if enabled and weight <= 0.0:
+                raise ValueError(f"{flag_name}=true requires {weight_name} > 0.")
+        return self
 
 
 class EvalConfig(BaseModel):

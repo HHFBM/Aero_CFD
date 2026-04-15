@@ -22,12 +22,24 @@ def create_app(checkpoint_path: str, device: str = "cpu") -> FastAPI:
     @app.post("/predict", response_model=PredictionResponse)
     def predict(request: PredictionRequest) -> PredictionResponse:
         result = predictor.predict_from_geometry(
-            geometry_params=np.asarray(request.geometry_params, dtype=np.float32),
+            geometry_params=np.asarray(request.geometry_params, dtype=np.float32) if request.geometry_params is not None else None,
             mach=request.mach,
             aoa_deg=request.aoa,
             query_points=np.asarray(request.query_points, dtype=np.float32),
             surface_points=np.asarray(request.surface_points, dtype=np.float32) if request.surface_points is not None else None,
             reynolds=request.reynolds,
+            geometry_mode=request.geometry_mode,
+            geometry_points=np.asarray(request.geometry_points, dtype=np.float32) if request.geometry_points is not None else None,
+            upper_surface_points=(
+                np.asarray(request.upper_surface_points, dtype=np.float32)
+                if request.upper_surface_points is not None
+                else None
+            ),
+            lower_surface_points=(
+                np.asarray(request.lower_surface_points, dtype=np.float32)
+                if request.lower_surface_points is not None
+                else None
+            ),
         )
         return PredictionResponse(
             predicted_fields=result["predicted_fields"].tolist(),
@@ -41,12 +53,24 @@ def create_app(checkpoint_path: str, device: str = "cpu") -> FastAPI:
         outputs = []
         for item in request.items:
             result = predictor.predict_from_geometry(
-                geometry_params=np.asarray(item.geometry_params, dtype=np.float32),
+                geometry_params=np.asarray(item.geometry_params, dtype=np.float32) if item.geometry_params is not None else None,
                 mach=item.mach,
                 aoa_deg=item.aoa,
                 query_points=np.asarray(item.query_points, dtype=np.float32),
                 surface_points=np.asarray(item.surface_points, dtype=np.float32) if item.surface_points is not None else None,
                 reynolds=item.reynolds,
+                geometry_mode=item.geometry_mode,
+                geometry_points=np.asarray(item.geometry_points, dtype=np.float32) if item.geometry_points is not None else None,
+                upper_surface_points=(
+                    np.asarray(item.upper_surface_points, dtype=np.float32)
+                    if item.upper_surface_points is not None
+                    else None
+                ),
+                lower_surface_points=(
+                    np.asarray(item.lower_surface_points, dtype=np.float32)
+                    if item.lower_surface_points is not None
+                    else None
+                ),
             )
             outputs.append(
                 {

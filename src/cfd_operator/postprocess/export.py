@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Any, Dict
+import warnings
 
 import numpy as np
 import pandas as pd
@@ -19,26 +20,36 @@ def export_analysis_bundle(output_dir: str | Path, payload: Dict[str, Any]) -> P
     save_json(predictions_json, _jsonify(payload))
     if "predicted_scalars" in payload:
         save_json(bundle_dir / "scalar_summary.json", _jsonify(payload["predicted_scalars"]))
+    if "metadata" in payload and "task_semantics" in payload["metadata"]:
+        save_json(bundle_dir / "task_semantics.json", _jsonify(payload["metadata"]["task_semantics"]))
 
     if "surface_predictions" in payload:
         surface = payload["surface_predictions"]
-        frame_payload = {
-            "x": np.asarray(surface["surface_points"])[:, 0],
-            "y": np.asarray(surface["surface_points"])[:, 1],
-            "cp_surface": np.asarray(surface["cp_surface"]).reshape(-1),
-            "pressure_surface": np.asarray(surface["pressure_surface"]).reshape(-1),
-        }
-        if "heat_flux_surface" in surface:
-            frame_payload["heat_flux_surface"] = np.asarray(surface["heat_flux_surface"]).reshape(-1)
-        if "wall_shear_surface" in surface:
-            frame_payload["wall_shear_surface"] = np.asarray(surface["wall_shear_surface"]).reshape(-1)
-        if "velocity_surface" in surface:
-            frame_payload["u_surface"] = np.asarray(surface["velocity_surface"])[:, 0]
-            frame_payload["v_surface"] = np.asarray(surface["velocity_surface"])[:, 1]
-        if "nut_surface" in surface:
-            frame_payload["nut_surface"] = np.asarray(surface["nut_surface"]).reshape(-1)
-        surface_frame = pd.DataFrame(frame_payload)
-        surface_frame.to_csv(bundle_dir / "surface_values.csv", index=False)
+        required_surface_keys = {"surface_points", "cp_surface", "pressure_surface"}
+        missing_surface_keys = required_surface_keys.difference(surface.keys())
+        if missing_surface_keys:
+            warnings.warn(
+                f"Skipping surface_values.csv export because surface_predictions is missing keys: {sorted(missing_surface_keys)}",
+                stacklevel=2,
+            )
+        else:
+            frame_payload = {
+                "x": np.asarray(surface["surface_points"])[:, 0],
+                "y": np.asarray(surface["surface_points"])[:, 1],
+                "cp_surface": np.asarray(surface["cp_surface"]).reshape(-1),
+                "pressure_surface": np.asarray(surface["pressure_surface"]).reshape(-1),
+            }
+            if "heat_flux_surface" in surface:
+                frame_payload["heat_flux_surface"] = np.asarray(surface["heat_flux_surface"]).reshape(-1)
+            if "wall_shear_surface" in surface:
+                frame_payload["wall_shear_surface"] = np.asarray(surface["wall_shear_surface"]).reshape(-1)
+            if "velocity_surface" in surface:
+                frame_payload["u_surface"] = np.asarray(surface["velocity_surface"])[:, 0]
+                frame_payload["v_surface"] = np.asarray(surface["velocity_surface"])[:, 1]
+            if "nut_surface" in surface:
+                frame_payload["nut_surface"] = np.asarray(surface["nut_surface"]).reshape(-1)
+            surface_frame = pd.DataFrame(frame_payload)
+            surface_frame.to_csv(bundle_dir / "surface_values.csv", index=False)
 
     if payload.get("slice_predictions"):
         field_names = payload.get("metadata", {}).get("field_names", ["u", "v", "p", "nut"])
@@ -46,6 +57,7 @@ def export_analysis_bundle(output_dir: str | Path, payload: Dict[str, Any]) -> P
         for index, slice_payload in enumerate(payload["slice_predictions"]):
             fields = np.asarray(slice_payload["slice_fields"], dtype=np.float32)
             points = np.asarray(slice_payload["slice_points"], dtype=np.float32)
+            active_field_names = list(field_names[: fields.shape[-1]])
             for point_index in range(points.shape[0]):
                 row: dict[str, float | str | int] = {
                     "slice_id": index,
@@ -53,10 +65,11 @@ def export_analysis_bundle(output_dir: str | Path, payload: Dict[str, Any]) -> P
                     "x": float(points[point_index, 0]),
                     "y": float(points[point_index, 1]),
                 }
-                for field_index, field_name in enumerate(field_names):
+                for field_index, field_name in enumerate(active_field_names):
                     row[str(field_name)] = float(fields[point_index, field_index])
                 rows.append(row)
-        pd.DataFrame(rows).to_csv(bundle_dir / "slice_values.csv", index=False)
+        if rows:
+            pd.DataFrame(rows).to_csv(bundle_dir / "slice_values.csv", index=False)
 
     if "feature_predictions" in payload:
         save_json(bundle_dir / "feature_summary.json", _jsonify(payload["feature_predictions"]))

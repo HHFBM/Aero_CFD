@@ -1,4 +1,10 @@
-"""Geometry abstractions."""
+"""Geometry abstractions.
+
+The abstract geometry object is only one possible upstream representation. The
+training pipeline ultimately consumes branch inputs, so dataset metadata may
+describe geometry summaries or sampled contours that are not safely
+reconstructable into a parameterized geometry object.
+"""
 
 from __future__ import annotations
 
@@ -25,4 +31,3 @@ class AirfoilParameterization(ABC):
     @abstractmethod
     def thickness_distribution(self, x: np.ndarray) -> np.ndarray:
         """Return half-thickness values for the provided x-coordinates."""
-

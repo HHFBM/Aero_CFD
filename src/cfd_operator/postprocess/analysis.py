@@ -26,7 +26,7 @@ def compute_surface_cp(
     gamma: float = 1.4,
     p_inf: float = 1.0,
 ) -> np.ndarray:
-    """Compute surface Cp from pressure.
+    """Compute surface Cp from raw surface pressure.
 
     Preferred path uses ``cp_reference = [p_ref, q_ref]``. If unavailable, a Mach-based
     reference is used. This is a standard nondimensional pressure conversion.
@@ -52,7 +52,7 @@ def compute_surface_pressure(
     surface_cp: Optional[np.ndarray] = None,
     cp_reference: Optional[np.ndarray] = None,
 ) -> np.ndarray:
-    """Return surface pressure.
+    """Return raw surface pressure.
 
     If pressure is not explicitly available but Cp and reference pressure are known,
     reconstruct pressure using ``p = p_ref + Cp * q_ref``.
@@ -68,6 +68,39 @@ def compute_surface_pressure(
         q_ref = max(float(cp_reference[1]), 1.0e-4)
         return (p_ref + np.asarray(surface_cp, dtype=np.float32).reshape(-1, 1) * q_ref).astype(np.float32)
     raise ValueError("Insufficient inputs to compute surface pressure.")
+
+
+def resolve_pressure_channel(
+    pressure_channel_values: np.ndarray,
+    pressure_target_mode: str,
+    cp_reference: Optional[np.ndarray] = None,
+) -> np.ndarray:
+    """Resolve the internal pressure-like channel to exported raw pressure.
+
+    ``pressure_target_mode='raw'`` means values are already raw pressure.
+    ``pressure_target_mode='cp_like'`` means values store (p - p_ref) / q_ref and need
+    ``cp_reference`` to reconstruct raw pressure.
+    """
+
+    values = np.asarray(pressure_channel_values, dtype=np.float32)
+    if pressure_target_mode == "raw":
+        return values.astype(np.float32)
+    if cp_reference is None:
+        raise ValueError("cp_reference is required to reconstruct raw pressure from cp_like pressure values.")
+    return compute_surface_pressure(surface_cp=values, cp_reference=cp_reference)
+
+
+def resolve_surface_cp(
+    pressure_channel_values: np.ndarray,
+    pressure_target_mode: str,
+    cp_reference: np.ndarray,
+) -> np.ndarray:
+    """Resolve the internal pressure-like channel to surface Cp."""
+
+    values = np.asarray(pressure_channel_values, dtype=np.float32)
+    if pressure_target_mode == "cp_like":
+        return values.astype(np.float32)
+    return compute_surface_cp(surface_pressure=values, cp_reference=cp_reference)
 
 
 def compute_surface_heat_flux(

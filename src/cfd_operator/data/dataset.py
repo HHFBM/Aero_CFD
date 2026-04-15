@@ -9,6 +9,7 @@ import torch
 from torch.utils.data import Dataset
 
 from cfd_operator.data.normalization import StandardNormalizer
+from cfd_operator.output_semantics import format_missing_fields_message
 
 
 class CFDOperatorDataset(Dataset[dict[str, torch.Tensor]]):
@@ -30,44 +31,49 @@ class CFDOperatorDataset(Dataset[dict[str, torch.Tensor]]):
         self.field_normalizer = field_normalizer
         self.scalar_normalizer = scalar_normalizer
 
+    def _payload_array(self, key: str, index: int, dtype: np.dtype = np.float32) -> np.ndarray:
+        if key not in self.payload:
+            raise KeyError(format_missing_fields_message("CFDOperatorDataset payload", [key]))
+        return np.asarray(self.payload[key][index], dtype=dtype)
+
     def __len__(self) -> int:
         return int(self.indices.shape[0])
 
     def __getitem__(self, item: int) -> dict[str, torch.Tensor | str]:
         index = int(self.indices[item])
-        branch_inputs = self.payload["branch_inputs"][index].astype(np.float32)
-        query_points = self.payload["query_points"][index].astype(np.float32)
-        field_targets = self.payload["field_targets"][index].astype(np.float32)
-        farfield_mask = self.payload["farfield_mask"][index].astype(np.float32)
-        farfield_targets = self.payload["farfield_targets"][index].astype(np.float32)
-        surface_points = self.payload["surface_points"][index].astype(np.float32)
-        surface_normals = self.payload["surface_normals"][index].astype(np.float32)
-        surface_arc_length = self.payload["surface_arc_length"][index].astype(np.float32)
-        cp_reference = self.payload["cp_reference"][index].astype(np.float32)
-        surface_cp = self.payload["surface_cp"][index].astype(np.float32)
-        surface_pressure = self.payload["surface_pressure"][index].astype(np.float32)
-        surface_velocity = self.payload["surface_velocity"][index].astype(np.float32)
-        surface_nut = self.payload["surface_nut"][index].astype(np.float32)
-        surface_heat_flux = self.payload["surface_heat_flux"][index].astype(np.float32)
-        surface_wall_shear = self.payload["surface_wall_shear"][index].astype(np.float32)
-        slice_points = self.payload["slice_points"][index].astype(np.float32)
-        slice_fields = self.payload["slice_fields"][index].astype(np.float32)
-        pressure_gradient_indicator = self.payload["pressure_gradient_indicator"][index].astype(np.float32)
-        shock_indicator = self.payload["shock_indicator"][index].astype(np.float32)
-        high_gradient_mask = self.payload["high_gradient_mask"][index].astype(np.float32)
-        shock_location = self.payload["shock_location"][index].astype(np.float32)
-        surface_pressure_available = self.payload["surface_pressure_available"][index].astype(np.float32)
-        surface_velocity_available = self.payload["surface_velocity_available"][index].astype(np.float32)
-        surface_nut_available = self.payload["surface_nut_available"][index].astype(np.float32)
-        surface_heat_flux_available = self.payload["surface_heat_flux_available"][index].astype(np.float32)
-        surface_wall_shear_available = self.payload["surface_wall_shear_available"][index].astype(np.float32)
-        slice_available = self.payload["slice_available"][index].astype(np.float32)
-        feature_available = self.payload["feature_available"][index].astype(np.float32)
-        nut_available = self.payload["nut_available"][index].astype(np.float32)
+        branch_inputs = self._payload_array("branch_inputs", index)
+        query_points = self._payload_array("query_points", index)
+        field_targets = self._payload_array("field_targets", index)
+        farfield_mask = self._payload_array("farfield_mask", index)
+        farfield_targets = self._payload_array("farfield_targets", index)
+        surface_points = self._payload_array("surface_points", index)
+        surface_normals = self._payload_array("surface_normals", index)
+        surface_arc_length = self._payload_array("surface_arc_length", index)
+        cp_reference = self._payload_array("cp_reference", index)
+        surface_cp = self._payload_array("surface_cp", index)
+        surface_pressure = self._payload_array("surface_pressure", index)
+        surface_velocity = self._payload_array("surface_velocity", index)
+        surface_nut = self._payload_array("surface_nut", index)
+        surface_heat_flux = self._payload_array("surface_heat_flux", index)
+        surface_wall_shear = self._payload_array("surface_wall_shear", index)
+        slice_points = self._payload_array("slice_points", index)
+        slice_fields = self._payload_array("slice_fields", index)
+        pressure_gradient_indicator = self._payload_array("pressure_gradient_indicator", index)
+        shock_indicator = self._payload_array("shock_indicator", index)
+        high_gradient_mask = self._payload_array("high_gradient_mask", index)
+        shock_location = self._payload_array("shock_location", index)
+        surface_pressure_available = self._payload_array("surface_pressure_available", index)
+        surface_velocity_available = self._payload_array("surface_velocity_available", index)
+        surface_nut_available = self._payload_array("surface_nut_available", index)
+        surface_heat_flux_available = self._payload_array("surface_heat_flux_available", index)
+        surface_wall_shear_available = self._payload_array("surface_wall_shear_available", index)
+        slice_available = self._payload_array("slice_available", index)
+        feature_available = self._payload_array("feature_available", index)
+        nut_available = self._payload_array("nut_available", index)
         shock_location_available = np.asarray(self.payload["shock_location_available"][index], dtype=np.float32).reshape(1)
-        scalar_targets = self.payload["scalar_targets"][index].astype(np.float32)
-        scalar_component_targets = self.payload["scalar_component_targets"][index].astype(np.float32)
-        scalar_component_available = self.payload["scalar_component_available"][index].astype(np.float32)
+        scalar_targets = self._payload_array("scalar_targets", index)
+        scalar_component_targets = self._payload_array("scalar_component_targets", index)
+        scalar_component_available = self._payload_array("scalar_component_available", index)
 
         query_mask = np.ones(query_points.shape[0], dtype=np.float32)
         surface_mask = np.ones(surface_points.shape[0], dtype=np.float32)
@@ -75,10 +81,20 @@ class CFDOperatorDataset(Dataset[dict[str, torch.Tensor]]):
 
         sample: dict[str, torch.Tensor | str] = {
             "airfoil_id": str(self.payload["airfoil_id"][index]),
-            "geometry_params": torch.from_numpy(self.payload["geometry_params"][index].astype(np.float32)),
-            "flow_conditions": torch.from_numpy(self.payload["flow_conditions"][index].astype(np.float32)),
+            "geometry_mode": str(self.payload.get("geometry_mode", ["unknown"])[index]),
+            "geometry_source": str(self.payload.get("geometry_source", ["unknown"])[index]),
+            "geometry_representation": str(self.payload.get("geometry_representation", ["unknown"])[index]),
+            "branch_encoding_type": str(self.payload.get("branch_encoding_type", ["unknown"])[index]),
+            "geometry_reconstructability": str(self.payload.get("geometry_reconstructability", ["unknown"])[index]),
+            "geometry_params_semantics": str(self.payload.get("geometry_params_semantics", ["unknown"])[index]),
+            "legacy_param_source": str(self.payload.get("legacy_param_source", ["unknown"])[index]),
+            "geometry_encoding_meta": str(self.payload.get("geometry_encoding_meta", [""])[index]),
+            "surface_sampling_info": str(self.payload.get("surface_sampling_info", [""])[index]),
+            "geometry_params": torch.from_numpy(self._payload_array("geometry_params", index)),
+            "flow_conditions": torch.from_numpy(self._payload_array("flow_conditions", index)),
             "branch_inputs_raw": torch.from_numpy(branch_inputs),
             "branch_inputs": torch.from_numpy(self.branch_normalizer.transform(branch_inputs)),
+            "geometry_points_raw": torch.from_numpy(self._payload_array("geometry_points", index)),
             "query_points_raw": torch.from_numpy(query_points),
             "query_points": torch.from_numpy(self.coordinate_normalizer.transform(query_points)),
             "field_targets_raw": torch.from_numpy(field_targets),

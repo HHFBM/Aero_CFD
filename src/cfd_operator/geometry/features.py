@@ -1,13 +1,24 @@
-"""Geometry feature encoders."""
+"""Geometry feature encoders.
 
-import numpy as np
+`branch_feature_mode` only governs parameterized geometry paths that call these
+helpers directly. Some dataset converters, such as the raw AirfRANS path, store
+their own branch encoding and bypass this helper by design.
+"""
+
 from typing import Optional
+import numpy as np
 
 from .base import AirfoilParameterization
+from .preprocess import canonicalize_closed_contour
 
 
 def sample_surface_signature(airfoil: AirfoilParameterization, num_points: int = 32) -> np.ndarray:
     points = airfoil.surface_points(num_points)
+    return points.reshape(-1).astype(np.float32)
+
+
+def sample_surface_signature_from_points(surface_points: np.ndarray, num_points: int = 32) -> np.ndarray:
+    points = canonicalize_closed_contour(surface_points, num_points=num_points)
     return points.reshape(-1).astype(np.float32)
 
 

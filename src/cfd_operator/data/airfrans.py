@@ -17,6 +17,7 @@ import numpy as np
 from cfd_operator.config.schemas import DataConfig
 from cfd_operator.data.schemas import CFDSample
 from cfd_operator.data.splitting import build_generalization_splits
+from cfd_operator.geometry.semantics import airfrans_geometry_semantics
 from cfd_operator.utils.io import ensure_dir, save_json
 
 
@@ -161,6 +162,7 @@ class AirfRANSDatasetConverter:
         airfrans = _require_airfrans()
         simulation = airfrans.Simulation(root=str(root), name=simulation_name)
         info = parse_airfrans_simulation_name(simulation_name)
+        geometry_semantics = airfrans_geometry_semantics(include_reynolds=self.config.include_reynolds)
 
         reynolds = float(simulation.inlet_velocity / simulation.NU)
         mach = float(simulation.inlet_velocity / simulation.C)
@@ -225,6 +227,16 @@ class AirfRANSDatasetConverter:
             fidelity_level=1,
             source=f"airfrans:{self.config.airfrans_task}",
             convergence_flag=1,
+            geometry_mode=geometry_semantics.geometry_mode,
+            geometry_source=geometry_semantics.geometry_source,
+            geometry_representation=geometry_semantics.geometry_representation,
+            branch_encoding_type=geometry_semantics.branch_encoding_type,
+            geometry_reconstructability=geometry_semantics.geometry_reconstructability,
+            geometry_params_semantics=geometry_semantics.geometry_params_semantics,
+            legacy_param_source=geometry_semantics.legacy_param_source,
+            geometry_points=surface_points,
+            geometry_encoding_meta=geometry_semantics.as_json(),
+            surface_sampling_info='{"source":"airfrans_surface_sample","ordering":"dataset_native","normalized":false}',
         )
 
     def _split_indices(self, samples: Sequence[CFDSample]) -> Dict[str, np.ndarray]:
@@ -262,6 +274,16 @@ class AirfRANSDatasetConverter:
         payload = {
             "airfoil_id": np.asarray([sample.airfoil_id for sample in samples]),
             "geometry_params": np.stack([sample.geometry_params for sample in samples]),
+            "geometry_mode": np.asarray([sample.geometry_mode for sample in samples]),
+            "geometry_source": np.asarray([sample.geometry_source for sample in samples]),
+            "geometry_representation": np.asarray([sample.geometry_representation for sample in samples]),
+            "branch_encoding_type": np.asarray([sample.branch_encoding_type for sample in samples]),
+            "geometry_reconstructability": np.asarray([sample.geometry_reconstructability for sample in samples]),
+            "geometry_params_semantics": np.asarray([sample.geometry_params_semantics for sample in samples]),
+            "legacy_param_source": np.asarray([sample.legacy_param_source for sample in samples]),
+            "geometry_points": np.stack([sample.geometry_points for sample in samples]).reshape(num_samples, num_surface_points, 2),
+            "geometry_encoding_meta": np.asarray([sample.geometry_encoding_meta for sample in samples]),
+            "surface_sampling_info": np.asarray([sample.surface_sampling_info for sample in samples]),
             "flow_conditions": np.stack([sample.flow_conditions for sample in samples]),
             "branch_inputs": np.stack([sample.branch_inputs for sample in samples]).reshape(num_samples, branch_dim),
             "query_points": np.stack([sample.query_points for sample in samples]).reshape(num_samples, num_query_points, 2),

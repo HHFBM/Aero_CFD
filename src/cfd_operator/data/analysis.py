@@ -6,6 +6,7 @@ from typing import Any
 
 import numpy as np
 
+from cfd_operator.output_semantics import format_missing_fields_message
 from cfd_operator.postprocess import (
     build_slice_points,
     compute_gradient_indicators,
@@ -25,6 +26,18 @@ def ensure_analysis_payload(payload: dict[str, Any]) -> dict[str, Any]:
     outputs or created as explicit placeholders so the rest of the pipeline can rely on
     a stable schema.
     """
+
+    required_core_keys = {
+        "airfoil_id",
+        "query_points",
+        "field_targets",
+        "surface_points",
+        "cp_reference",
+        "surface_cp",
+    }
+    missing_core_keys = required_core_keys.difference(payload.keys())
+    if missing_core_keys:
+        raise ValueError(format_missing_fields_message("ensure_analysis_payload input", missing_core_keys))
 
     num_samples = len(payload["airfoil_id"])
     num_surface_points = int(np.asarray(payload["surface_points"]).shape[1])

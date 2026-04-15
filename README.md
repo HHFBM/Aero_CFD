@@ -1,169 +1,328 @@
 # CFD Operator Surrogate
 
-面向飞行器 CFD 计算加速的神经算子代理模型工程。当前版本保持 `DeepONet` 风格 operator surrogate 主线不变，同时支持两类路径：`AirfRANS` 的 2D 不可压缩 RANS 数据主路径，以及 toy/compressible 演示数据路径。工程包含监督训练、physics-informed 混合训练、评测可视化、推理 CLI 和 FastAPI 服务。
+面向飞行器 CFD 加速分析的神经算子代理工程。当前仓库已经从“基础数值输出”推进到“分析型输出增强阶段（AirfRANS 适配版）”，并保持现有训练主线不被推翻：
 
-## 适用场景
+- 不删除现有接口
+- 不重写训练主线
+- 继续基于 2D / 简化翼型代理主线
+- 严格按 AirfRANS 实际可提供的数据设计监督与输出
 
-- 二维参数化翼型快速气动筛选
-- CFD 前期设计空间探索
-- surrogate baseline / operator learning 研究
-- 真实 CFD 数据工程接入前的训练部署骨架
+当前工程支持两条主要路线：
 
-## 当前支持能力
+- `DeepONet` 主线
+- `Geo-FNO` 对比基线
 
-- 几何：NACA 4-digit 参数化翼型
-- 数据：toy synthetic dataset、AirfRANS 转换接入、NPZ 文件数据集读取，预留 CSV/Parquet/Pickle 接口
-- 模型：DeepONet 主模型，FNO / GeoFNO placeholder
-- 输出：
-  - 查询点处流场变量 `u, v, p` 与第 4 通道 `aux`
-    - AirfRANS 适配时第 4 通道为 `nut`
-    - toy/compressible 演示配置下第 4 通道仍可为 `rho`
-  - 表面 `Cp` / `pressure_surface`
-  - 表面速度 / `nut_surface`（当第 4 通道真实为 `nut` 时）
-  - 表面热流代理 `heat_flux_surface`
-  - 表面壁面剪切代理 `wall_shear_surface`
-  - 标量气动系数 `Cl, Cd`
-  - line slice field outputs
-  - high-gradient indicators / summaries
-- 训练：
-  - 纯监督训练
-  - physics-informed 混合训练
-  - boundary consistency 约束训练
-  - checkpoint / best model / early stopping / history 记录
-- 评测：
-  - field MSE / RMSE / relative error
-  - `Cp` 误差
-  - `Cl/Cd` MAE / relative error
-  - `IID / unseen geometry / unseen condition` 多测试切片
-  - 图像与 markdown/json 报告
-- 推理：
-  - 单样本 CLI
-  - FastAPI 服务 `GET /health` `POST /predict` `POST /predict_batch`
+并已经打通：
 
-## 关键说明
+- 训练
+- 评测
+- 推理
+- analysis bundle 导出
+- 可视化
+- Colab notebook 运行入口
 
-- 当前是 **二维参数化翼型代理模型**，不是工业级三维 CFD 求解器替代品。
-- toy dataset 仅用于演示工程闭环，不代表真实工程精度，也不能用于结论性气动设计。
-- AirfRANS 当前以“离线转换到统一 NPZ schema”的方式接入，训练主线不直接依赖 AirfRANS 原始 API。
-- physics-informed 模块采用 **二维稳态可压缩 Euler 简化残差**：
-  - continuity residual
-  - x-momentum residual
-  - y-momentum residual
-  - optional energy residual
-- boundary consistency 模块当前包含：
-  - 壁面无穿透约束
-  - 远场状态一致性约束
-- 残差由自动微分计算，目的是提供物理结构约束，不对应真实求解器的离散守恒格式。
-- 当前数据生成与物理项默认假设远场静压 `p_inf=1`、比热比 `gamma=1.4`，且未显式建模粘性边界层和激波捕捉。
-- `heat_flux_surface` 与 `wall_shear_surface` 当前是 **近似后处理 proxy**，用于分析型输出打通，不代表工业级壁面热流/壁面剪切高精度预测。
-- `shock_indicator` 与 `shock_location_summary` 当前也是 **简化近似版本**，主要用于研究验证和报告分析。
+## 1. 项目定位
 
-## AirfRANS 分析输出增强阶段
+这个项目不是工业级三维 CFD 求解器替代品，而是一个“可训练、可评测、可解释、可导出”的 2D 气动代理系统。
 
-当前仓库已经补齐一版“分析型输出增强阶段（AirfRANS 适配版）”，但严格区分了三类输出：
+适用场景：
 
-- 真实监督/真实打通：
-  - pointwise `u, v, p, nut`
-  - scalar `cl, cd`
+- 二维翼型快速筛选
+- 设计空间探索前置过滤
+- CFD surrogate / operator learning baseline
+- AirfRANS 数据工程接入与多任务分析输出验证
+- 结果汇报、曲线对比和剖面分析
+
+当前不适用的场景：
+
+- 工业级 3D 全机高保真流场
+- 热流定量设计
+- 强激波专用高精度定位
+- 复杂壁面摩擦阻力工程定量替代
+
+## 2. 当前已经实现的能力
+
+### 2.1 数据
+
+支持以下数据路径：
+
+- `synthetic` toy 数据
+- `airfrans` 转换数据
+- `airfrans_original` 原始 AirfRANS 离线转换数据
+- `file` 类型 `.npz` 数据集
+
+当前主训练数据路径是 AirfRANS heavy 数据的统一 `.npz` 格式。
+
+### 2.2 模型
+
+已可用模型：
+
+- `DeepONet`
+- `Geo-FNO`
+
+当前 `Geo-FNO` 已经不再是 placeholder，而是一个可训练、可评测的非规则点云几何感知频域基线。
+
+标准 `FNO` 仍未作为当前 AirfRANS 主路径的正式训练模型，因为现有 `query_points` 是样本级非规则点云，不是共享规则网格。若后续要做标准 FNO，需要先统一网格化。
+
+### 2.3 输出
+
+当前优先真实打通的输出：
+
+- pointwise fields
+  - `u`
+  - `v`
+  - `p`
+  - `nut`
+- scalar outputs
+  - `cl`
+  - `cd`
+- surface outputs
   - `pressure_surface`
   - `cp_surface`
-  - `slice` 上的 `u, v, p, nut`
-- derived outputs：
-  - `cp_surface`
-    - 若数据源只提供表面压力，则由 `Cp = (p - p_ref) / q_ref` 推导
+- slice outputs
+  - line slice 上的 `u / v / p / nut`
+- feature / analysis outputs
   - `high_gradient_mask`
   - `pressure_gradient_indicator`
   - `high_gradient_region_summary`
-  - `wall_shear_surface`
-    - 当前仅为近似后处理，不是 AirfRANS 真实 wall-shear supervision
-- placeholder / TODO：
-  - `heat_flux_surface`
-  - `shock_indicator`
-  - `shock_location`
-  - `rho`
-  - `cm`
-  - `cdp / cdv / clp / clv`
 
-### 物理意义说明
+### 2.4 推理与导出
+
+当前推理链路已支持：
+
+- `infer.py` 单样本推理
+- FastAPI 接口
+- `analysis_bundle` 文件导出
+- PNG 图导出
+
+导出文件包括：
+
+- `predictions.json`
+- `scalar_summary.json`
+- `surface_values.csv`
+- `slice_values.csv`
+- `feature_summary.json`
+- 图像文件
+
+### 2.5 评测与测试
+
+当前评测已支持：
+
+- field RMSE / relative error
+- `cl/cd` MAE / relative error
+- `cp_surface_rmse`
+- `pressure_surface_rmse`
+- `slice_rmse`
+- feature accuracy / IoU / F1
+
+测试已覆盖：
+
+- 数据与 schema
+- postprocess
+- infer bundle
+- scalar outputs
+- surface outputs
+- slice outputs
+- feature outputs
+- loss
+- physics
+- smoke train / eval
+- Geo-FNO smoke train
+
+最近一次全量测试结果：
+
+- `21 passed`
+
+## 3. AirfRANS 适配原则
+
+当前实现严格遵守 AirfRANS 的真实边界：
+
+- AirfRANS 是 2D、不可压缩、亚声速 RANS 数据
+- 主字段围绕 `velocity / pressure / turbulent viscosity`
+- 可真实监督的主线是 `u / v / p / nut / cl / cd / pressure_surface`
+
+因此当前工程明确区分三类量。
+
+### 3.1 真实监督 / 真实打通
+
+- `u`
+- `v`
+- `p`
+- `nut`
+- `cl`
+- `cd`
+- `pressure_surface`
+- `slice u / v / p / nut`
+
+### 3.2 Derived outputs
+
+- `cp_surface`
+- `high_gradient_mask`
+- `pressure_gradient_indicator`
+- `high_gradient_region_summary`
+- `wall_shear_surface`
+
+### 3.3 Placeholder / TODO
+
+- `rho`
+- `heat_flux_surface`
+- `shock_indicator`
+- `shock_location`
+- `cm`
+- `cdp / cdv / clp / clv`
+
+这些 placeholder 量当前不会被伪装成 AirfRANS 正式 benchmark 结果。
+
+## 4. 输出的物理意义
+
+### 4.1 Pointwise fields
+
+- `u`
+  - x 方向速度分量
+- `v`
+  - y 方向速度分量
+- `p`
+  - 压力场
+- `nut`
+  - 湍流运动粘性 / 涡粘性，用于刻画湍流导致的等效扩散能力
+
+### 4.2 Scalars
+
+- `cl`
+  - 升力系数
+- `cd`
+  - 阻力系数
+
+### 4.3 Surface outputs
 
 - `pressure_surface`
-  - 翼型表面静压分布，用于观察吸力峰、压差载荷和沿表面压力恢复。
+  - 翼型表面压力分布
 - `cp_surface`
-  - 无量纲压力系数，定义为 `Cp = (p - p_ref) / q_ref`。
-  - 这里 `p_ref` 与 `q_ref` 来自数据或推理输入中的 freestream reference。
-- `line slice`
-  - 在 `x = const`、`y = const` 或任意 2D 线段上抽取 `u/v/p/nut`，用于查看尾迹、恢复段和局部流动结构。
-- `high_gradient_indicator`
-  - 基于压力梯度高值区域的分析指标，用于快速定位强变化区域。
-  - 在 AirfRANS 场景中它是分析代理，不应表述为真实 shock ground truth。
+  - 表面压力系数，定义为 `Cp = (p - p_ref) / q_ref`
 
-### 为什么当前不把 `heat flux / shock / rho` 作为主监督目标
+### 4.4 Slice outputs
 
-- AirfRANS 是 2D、不可压缩、亚声速 RANS 数据集，不提供真实的壁面热流监督。
-- AirfRANS 当前主字段围绕 velocity / pressure / turbulent viscosity / distance function，而不是 variable density。
-- shock 相关标签在该数据条件下不应被包装成正式 ground truth；当前只允许作为高梯度近似分析接口。
+line slice 表示沿指定二维直线抽取的局部剖面，当前支持：
 
-## 技术架构
+- `x = const`
+- `y = const`
+- 任意线段
 
-```text
-geometry params + flow conditions + query points
-    -> data module / normalizers
-    -> operator model (DeepONet)
-    -> field head: [u, v, p, aux]
-         - AirfRANS: aux = nut
-         - toy compressible demo: aux = rho
-    -> scalar head: [Cl, Cd]
-    -> surface outputs via surface-point evaluation + postprocess
-         - Cp
-         - pressure
-         - optional velocity / nut
-         - approximate heat flux / wall shear
-    -> slice outputs via slice sampling
-    -> feature outputs
-         - high-gradient indicator
-         - high-gradient summary
-    -> composite loss
-         - field loss
-         - surface Cp loss
-         - optional surface pressure / slice / feature loss
-         - scalar loss
-         - physics residual loss
-         - boundary consistency loss
-    -> trainer / evaluator / inference / API
-```
+### 4.5 Feature outputs
 
-## 项目结构
+- `high_gradient_mask`
+  - 高梯度区域指示
+- `pressure_gradient_indicator`
+  - 基于压力梯度的分析特征
+- `high_gradient_region_summary`
+  - 高梯度区域比例、峰值和统计总结
+
+## 5. 模型原理
+
+### 5.1 DeepONet
+
+当前 `DeepONet` 主线是典型 branch-trunk 结构：
+
+- branch 负责编码几何和工况
+- trunk 负责编码空间位置
+- 二者融合后输出局部场响应
+
+它学习的是一个算子映射：
+
+`geometry + flow conditions + query point -> flow response`
+
+这种方式适合：
+
+- 非规则点云查询
+- 不同样本拥有不同空间采样点
+- surface / volume / slice 共用一条主线
+
+### 5.2 Geo-FNO
+
+当前 `Geo-FNO` 是针对非规则 2D 点集的几何感知频域模型。
+
+它不是标准规则网格 FNO，而是：
+
+- 在非规则点上做低频谱基展开
+- 做全局频域信息混合
+- 再结合局部 MLP 和条件编码进行更新
+
+当前实现的意义：
+
+- 保留频域全局建模优势
+- 避免强行把 AirfRANS 点云插值成固定网格
+- 能与当前训练、评测、推理、surface/slice loss 直接兼容
+
+### 5.3 为什么当前第四通道是 `nut` 不是 `rho`
+
+AirfRANS 主线是不可压缩 RANS，不是可压缩 Euler。  
+因此第 4 通道当前更合理地定义为 `nut`：
+
+- `rho`
+  - 密度，更偏可压缩流主变量
+- `nut`
+  - 湍流运动粘性，更符合 AirfRANS 可真实监督的字段
+
+## 6. 当前 physics loss 设计
+
+当前 physics loss 已经支持两条路径：
+
+- 第 4 通道为 `rho`
+  - 使用原可压缩 Euler residual
+- 第 4 通道为 `nut`
+  - 使用不可压缩 RANS 风格 proxy residual
+
+`nut` 路径下当前包含：
+
+- 连续性残差
+  - `du/dx + dv/dy`
+- 动量残差
+  - 对 `u / v / p` 做不可压缩 RANS 风格约束
+- `nut` 输运 proxy
+  - 对湍流粘性做平滑和输运近似约束
+
+注意：
+
+- 当前 physics loss 是研究型代理约束，不是求解器离散格式的严格复现
+- 对 AirfRANS 而言，它更适合做弱物理正则，而不是“真实方程解”
+
+## 7. 仓库结构
 
 ```text
 configs/
   data/
-  model/
-  train/
-  eval/
-  serve/
-  default.yaml
+  experiments/
 src/cfd_operator/
   config/
   data/
-  geometry/
-  physics/
-  models/
-  losses/
-  trainers/
   evaluators/
   inference/
-  api/
-  utils/
+  losses/
+  models/
+  physics/
+  postprocess/
+  trainers/
   visualization/
 scripts/
-tests/
 examples/
+tests/
 outputs/
 ```
 
-## 安装
+关键文件：
 
-推荐 Python `3.11+`。当前仓库代码保持了更保守的语法兼容性，但建议训练与部署使用较新的 Python / PyTorch 环境。
+- [configs/experiments/airfrans_original_heavy.yaml](/Users/jason/Documents/CFD/configs/experiments/airfrans_original_heavy.yaml)
+- [configs/experiments/airfrans_geofno_heavy.yaml](/Users/jason/Documents/CFD/configs/experiments/airfrans_geofno_heavy.yaml)
+- [scripts/train.py](/Users/jason/Documents/CFD/scripts/train.py)
+- [scripts/evaluate.py](/Users/jason/Documents/CFD/scripts/evaluate.py)
+- [scripts/infer.py](/Users/jason/Documents/CFD/scripts/infer.py)
+- [src/cfd_operator/models/deeponet.py](/Users/jason/Documents/CFD/src/cfd_operator/models/deeponet.py)
+- [src/cfd_operator/models/fno.py](/Users/jason/Documents/CFD/src/cfd_operator/models/fno.py)
+- [src/cfd_operator/postprocess/analysis.py](/Users/jason/Documents/CFD/src/cfd_operator/postprocess/analysis.py)
+
+## 8. 安装
+
+推荐 Python `3.10+`。
 
 ```bash
 python -m venv .venv
@@ -172,411 +331,235 @@ pip install -r requirements.txt
 pip install -e .
 ```
 
-如果要接入 AirfRANS，再额外安装可选数据依赖：
+如果要使用 AirfRANS 数据转换：
 
 ```bash
 pip install ".[data]"
 ```
 
-如果本机 `matplotlib` 无法写默认缓存目录，可临时设置：
+## 9. 数据准备
 
-```bash
-export MPLCONFIGDIR=/tmp/mpl
-export XDG_CACHE_HOME=/tmp
-```
-
-## 配置系统
-
-项目使用纯 YAML 配置，并支持命令行覆盖：
-
-```bash
-python scripts/train.py --config configs/default.yaml --override train.epochs=5 --override loss.use_physics=false
-```
-
-主配置分区：
-
-- `experiment`
-- `data`
-- `model`
-- `train`
-- `loss`
-- `eval`
-- `serve`
-
-## 数据准备
-
-### 1. 生成 toy dataset
+### 9.1 生成 toy 数据
 
 ```bash
 python scripts/prepare_dataset.py --config configs/default.yaml
 ```
 
-也可以覆盖样本规模：
+### 9.2 转换 AirfRANS
 
 ```bash
 python scripts/prepare_dataset.py \
   --config configs/default.yaml \
-  --override data.dataset_path=outputs/data/toy_small.npz \
-  --override data.num_geometries=8 \
-  --override data.conditions_per_geometry=8 \
-  --override data.num_query_points=128 \
-  --override data.num_surface_points=80
+  --override data.dataset_type=airfrans_original \
+  --override data.dataset_path=outputs/data/airfrans_original_heavy.npz
 ```
 
-当前 toy dataset 会显式生成：
+### 9.3 当前主对比数据切分
 
-- seen geometry / seen condition 的 `train / val / test`
-- `test_unseen_geometry`
-- `test_unseen_condition`
+当前统一对比主要使用：
 
-### 2. 当前样本字段
+- [outputs/data/airfrans_original_heavy_resplit.npz](/Users/jason/Documents/CFD/outputs/data/airfrans_original_heavy_resplit.npz)
+- [outputs/data/airfrans_original_heavy_resplit.json](/Users/jason/Documents/CFD/outputs/data/airfrans_original_heavy_resplit.json)
 
-每个样本至少包含：
+切分口径：
 
-- `airfoil_id`
-- `geometry_params`
-- `flow_conditions`
-- `branch_inputs`
-- `query_points`
-- `field_targets`
-- `farfield_mask`
-- `farfield_targets`
-- `surface_points`
-- `surface_normals`
-- `surface_cp`
-- `surface_pressure`
-- `surface_heat_flux`
-- `surface_wall_shear`
-- `slice_points`
-- `slice_fields`
-- `shock_indicator`
-- `high_gradient_mask`
-- `shock_location`
-- `scalar_targets`
-- `metadata`
-  - `fidelity_level`
-  - `source`
-  - `convergence_flag`
+- 总样本：`1000`
+- train：`700`
+- val：`150`
+- test：`150`
 
-### 3. 文件型数据集
+## 10. 训练
 
-当前主路径是 `.npz`。默认 toy dataset 会保存为定长数组格式，便于直接训练。CSV/Parquet/Pickle 的接口已预留，但真实生产环境建议统一整理成 NPZ 或者自定义 reader。
-
-### 4. AirfRANS 数据接入
-
-当前已支持把官方 AirfRANS 数据集下载并转换成项目自己的统一 `.npz` 格式。
-
-转换命令：
-
-```bash
-python scripts/prepare_dataset.py \
-  --config configs/default.yaml \
-  --override data.dataset_type=airfrans \
-  --override data.dataset_path=outputs/data/airfrans_full.npz \
-  --override data.airfrans_root=outputs/data/airfrans_raw \
-  --override data.airfrans_task=full
-```
-
-也可以限制样本数做快速验证：
-
-```bash
-python scripts/prepare_dataset.py \
-  --config configs/default.yaml \
-  --override data.dataset_type=airfrans \
-  --override data.dataset_path=outputs/data/airfrans_tiny.npz \
-  --override data.airfrans_root=outputs/data/airfrans_raw \
-  --override data.airfrans_task=full \
-  --override data.airfrans_max_samples=32
-```
-
-AirfRANS 转换后的字段映射为：
-
-- `field_targets = [u, v, p, nut]`
-- `surface_pressure`
-  - 由 AirfRANS 表面采样直接读取
-- `surface_cp`
-  - 由 `surface_pressure` 和 `cp_reference = [p_ref, q_ref]` 推导
-- `scalar_targets = [cl, cd]`
-  - 由官方 `Simulation.force_coefficient(reference=True)` 计算
-- `slice_fields`
-  - 由 2D 场采样/插值得到
-- `high_gradient_*`
-  - 由压力梯度近似生成，用于分析而非官方 benchmark
-
-注意：
-
-- AirfRANS 是 **不可压缩 RANS** 数据，不是你当前项目目标里的可压 Euler 高保真数据。
-- AirfRANS 当前真实主监督集中在 `u / v / p / nut / cl / cd / pressure_surface`。
-- `cp_surface` 是 derived output，不是额外原生标签。
-- `heat_flux_surface / wall_shear_surface / shock_* / rho` 不是 AirfRANS 真实监督主任务。
-- 如果用 AirfRANS 训练，建议把 physics loss 视为弱约束，并结合任务需要重新调 `physics_weight`。
-
-## 训练
-
-### 1. 纯监督训练
+### 10.1 DeepONet 训练
 
 ```bash
 python scripts/train.py \
-  --config configs/default.yaml \
-  --override loss.use_physics=false
+  --config configs/experiments/airfrans_original_heavy.yaml
 ```
 
-### 2. physics-informed 混合训练
+### 10.2 Geo-FNO 训练
 
 ```bash
 python scripts/train.py \
-  --config configs/default.yaml \
-  --override loss.use_physics=true \
-  --override loss.physics_weight=0.1 \
-  --override loss.boundary_weight=0.1
+  --config configs/experiments/airfrans_geofno_heavy.yaml
 ```
 
-用 AirfRANS 训练时，先把 `dataset_type` 改成 `file`，读取转换后的 NPZ：
+### 10.3 常用 override 示例
 
 ```bash
 python scripts/train.py \
-  --config configs/default.yaml \
-  --override data.dataset_type=file \
-  --override data.dataset_path=outputs/data/airfrans_full.npz
+  --config configs/experiments/airfrans_original_heavy.yaml \
+  --override experiment.name=my_run \
+  --override train.epochs=12 \
+  --override loss.use_physics=false \
+  --override loss.physics_weight=0.0
 ```
 
-训练输出默认保存到：
+训练输出默认位于：
 
 ```text
 outputs/<experiment.name>/
   checkpoints/
   logs/
   reports/
-  figures/
+  eval/
 ```
 
-主要产物：
-
-- `checkpoints/best.pt`
-- `reports/history.csv`
-- `reports/latest_metrics.json`
-- `logs/train.log`
-
-### 分析型输出相关训练开关
-
-当前可通过 loss 配置单独开启或关闭：
-
-- `loss.use_surface_pressure_loss`
-- `loss.use_slice_loss`
-- `loss.use_feature_loss`
-- `loss.use_heat_flux_loss`
-- `loss.use_wall_shear_loss`
-
-当前推荐：
-
-- `cp_surface`、`pressure_surface`、`slice field`：可真实打通并参与监督
-- `heat_flux_surface`、`wall_shear_surface`：默认只做后处理导出，不建议当作高精度监督目标
-
-## 评测
+## 11. 评测
 
 ```bash
 python scripts/evaluate.py \
-  --config configs/default.yaml \
-  --checkpoint outputs/default_run/checkpoints/best.pt
+  --config configs/experiments/airfrans_original_heavy.yaml \
+  --checkpoint outputs/<run>/checkpoints/best.pt
 ```
 
-评测 unseen geometry：
+Geo-FNO 评测：
 
 ```bash
 python scripts/evaluate.py \
-  --config configs/default.yaml \
-  --checkpoint outputs/default_run/checkpoints/best.pt \
-  --override eval.split_name=test_unseen_geometry
-```
-
-评测 unseen condition：
-
-```bash
-python scripts/evaluate.py \
-  --config configs/default.yaml \
-  --checkpoint outputs/default_run/checkpoints/best.pt \
-  --override eval.split_name=test_unseen_condition
-```
-
-关闭绘图时：
-
-```bash
-python scripts/evaluate.py \
-  --config configs/default.yaml \
-  --checkpoint outputs/default_run/checkpoints/best.pt \
-  --override eval.save_plots=false
+  --config configs/experiments/airfrans_geofno_heavy.yaml \
+  --checkpoint outputs/<geofno_run>/checkpoints/best.pt
 ```
 
 评测输出包括：
 
 - `metrics.json`
 - `report.md`
-- parity/scatter/field/Cp 图
-- surface pressure / surface Cp 图
-- `slice_<field>.png`
+- `report.json`
+- loss curve
+- `cl/cd` scatter
+- sample 级 `surface_cp.png`
+- `surface_pressure.png`
+- `slice_*.png`
 - `high_gradient_regions.png`
-- sample 级 `predictions.json`、`scalar_summary.json`、`surface_values.csv`、`slice_values.csv`、`feature_summary.json`
 
-## 当前模型能输出什么
+## 12. 推理与 analysis bundle
 
-### 1. Pointwise Field Outputs
+示例输入：
 
-- `u`
-- `v`
-- `p`
-- 第 4 通道 `aux`
-  - AirfRANS 训练配置下为 `nut`
-  - toy/compressible 演示配置下可为 `rho`
+- [examples/inference_input.json](/Users/jason/Documents/CFD/examples/inference_input.json)
 
-### 2. Scalar Outputs
-
-- `cl`
-- `cd`
-- 预留接口：`cdp / cdv / clp / clv / cm`
-  - 当前默认不作为真实训练主任务
-
-### 3. Surface Outputs
-
-- `pressure_surface`
-- `cp_surface`
-  - 由 `pressure_surface` 和 freestream reference 派生
-- optional `velocity_surface`
-- optional `nut_surface`
-- `heat_flux_surface`
-  - placeholder / approximate postprocess
-- `wall_shear_surface`
-  - derived / approximate postprocess
-
-### 4. Slice Outputs
-
-- 任意 `x=const`
-- 任意 `y=const`
-- 任意二维线段
-- slice 上可导出 `u / v / p / aux`
-  - AirfRANS 主路径下 `aux = nut`
-
-### 5. Region / Feature Outputs
-
-- `high_gradient_mask`
-- `pressure_gradient_indicator`
-- `high_gradient_region_summary`
-- `shock_indicator`
-  - placeholder / high-gradient approximation
-- `shock_location_summary`
-  - placeholder / high-gradient approximation
-
-## 这些输出和飞行器分析的关系
-
-- `cp_surface`
-  - 用于看表面载荷分布、吸力峰和沿表面压差变化。
-- `pressure_surface`
-  - 是 `Cp` 之外更直接的压力结果，可用于后续载荷分析。
-- `slice field`
-  - 有助于看中心线/法向切片上的压力恢复、尾迹和局部高梯度区。
-- `high_gradient_mask` / `pressure_gradient_indicator`
-  - 用于快速标记高梯度流动特征区；在 AirfRANS 场景中不应包装成真实 shock ground truth。
-- `cl/cd`
-  - 对应整体气动性能指标。
-
-## 当前哪些输出是真实监督，哪些是近似
-
-真实打通或可直接监督：
-
-- `u, v, p, nut`（AirfRANS 主路径）
-- `cl, cd`
-- `pressure_surface`
-- `slice_fields`
-  - 由点场结果沿指定切线导出，可参与 slice loss
-
-derived outputs：
-
-- `cp_surface`
-- `high_gradient_mask`
-- `pressure_gradient_indicator`
-- `high_gradient_region_summary`
-
-近似后处理 / 占位：
-
-- `heat_flux_surface`
-- `wall_shear_surface`
-- `shock_indicator`
-- `shock_location_summary`
-- `rho`
-- `cdp / cdv / clp / clv / cm`
-
-这些近似输出当前主要用于工程原型和研究验证，不应视为高雷诺数、强激波、复杂粘性场景下的工业级结果。
-
-## 推理
-
-示例输入见 [examples/inference_input.json](/Users/jason/Documents/CFD/examples/inference_input.json)。
+推理命令：
 
 ```bash
 python scripts/infer.py \
-  --checkpoint outputs/default_run/checkpoints/best.pt \
+  --checkpoint outputs/<run>/checkpoints/best.pt \
   --input examples/inference_input.json \
-  --output outputs/default_run/inference.json
+  --output outputs/<run>/inference.json \
+  --export-dir outputs/<run>/analysis_bundle
 ```
 
-支持输出格式：
-
-- `.json`
-- `.csv`
-- `.npz`
-
-输入需要包含：
-
-- `geometry_params`
-- `mach`
-- `aoa`
-- `query_points`
-- 可选 `surface_points`
-- 可选 `slice_definitions`
-- 可选 `reynolds`
-
-### 完整分析型推理
-
-```bash
-python scripts/infer.py \
-  --checkpoint outputs/default_run/checkpoints/best.pt \
-  --input examples/inference_input.json \
-  --output outputs/default_run/inference.json \
-  --export-dir outputs/default_run/analysis_bundle
-```
-
-导出目录中会包含：
+analysis bundle 目前会导出：
 
 - `predictions.json`
+- `scalar_summary.json`
 - `surface_values.csv`
 - `slice_values.csv`
 - `feature_summary.json`
 - `surface_cp.png`
 - `surface_pressure.png`
-- `slice_pressure.png`
+- `slice_u.png`
+- `slice_v.png`
+- `slice_p.png`
+- `slice_nut.png`
 - `high_gradient_regions.png`
-- `scalar_summary.png`
 
-更详细说明见 [examples/analysis_outputs.md](/Users/jason/Documents/CFD/examples/analysis_outputs.md)。
+更多说明见：
 
-## API 服务
+- [examples/analysis_outputs.md](/Users/jason/Documents/CFD/examples/analysis_outputs.md)
+- [examples/analysis_outputs_airfrans.md](/Users/jason/Documents/CFD/examples/analysis_outputs_airfrans.md)
 
-启动方式：
+## 13. Colab Notebook
+
+仓库已提供独立 notebook：
+
+- [CFD.ipynb](/Users/jason/Documents/CFD/CFD.ipynb)
+
+它包含：
+
+- 环境准备
+- Drive/Colab 路径配置
+- 数据重切分
+- 训练
+- 评测
+- 推理
+- 图像展示
+
+说明：
+
+- notebook 不修改本地 Python 代码
+- 会根据 `torch.cuda.is_available()` 自动选择 GPU 或 CPU
+- 在 Colab 中需要先把整个仓库上传到 Google Drive 或 `/content`
+
+## 14. 当前结果
+
+### 14.1 DeepONet full-physics 主结果
+
+主结果目录：
+
+- [outputs/airfrans_r1_full_physics](/Users/jason/Documents/CFD/outputs/airfrans_r1_full_physics)
+
+报告：
+
+- [r_1.md](/Users/jason/Documents/CFD/r_1.md)
+- [results.md](/Users/jason/Documents/CFD/results.md)
+
+### 14.2 Geo-FNO vs DeepONet 对比
+
+对比目录：
+
+- Geo-FNO：
+  - [outputs/airfrans_geofno_r1_nophysics12](/Users/jason/Documents/CFD/outputs/airfrans_geofno_r1_nophysics12)
+- DeepONet：
+  - [outputs/airfrans_deeponet_r1_nophysics12](/Users/jason/Documents/CFD/outputs/airfrans_deeponet_r1_nophysics12)
+
+统一口径下的测试集对比：
+
+| Metric | Geo-FNO | DeepONet no-physics |
+| --- | ---: | ---: |
+| `field_rmse` | `0.2742` | `0.3454` |
+| `cp_surface_rmse` | `0.7797` | `1.0499` |
+| `slice_rmse` | `0.1664` | `0.2125` |
+| `cl_mae` | `0.0952` | `0.1299` |
+| `cd_mae` | `8.93e-4` | `1.42e-3` |
+| `high_gradient_iou` | `0.7539` | `0.6975` |
+| `pressure_gradient_f1` | `0.5594` | `0.3465` |
+
+当前结论：
+
+- Geo-FNO 在场、surface、slice、feature 指标上更强
+- DeepONet full-physics 版本在部分全局标量上仍更稳
+
+## 15. 如何使用这些输出
+
+当前最实际的用法是：
+
+- 作为二维翼型方案的快速分析器
+- 做批量设计筛选前置过滤
+- 看 `cl/cd` 趋势
+- 看 `Cp` 和表面压力分布
+- 看 slice 剖面与尾迹恢复
+- 用高梯度区域做流动变化诊断
+
+推荐工作流：
+
+1. 批量生成候选翼型和工况
+2. 用 surrogate 先跑一遍
+3. 保留较优候选
+4. 对候选方案再跑真实 CFD 精算
+
+## 16. API
+
+启动：
 
 ```bash
 python scripts/serve.py \
-  --checkpoint outputs/default_run/checkpoints/best.pt \
+  --checkpoint outputs/<run>/checkpoints/best.pt \
   --host 127.0.0.1 \
   --port 8000
 ```
 
-也可以直接用 uvicorn：
-
-```bash
-export CFD_OPERATOR_CHECKPOINT=outputs/default_run/checkpoints/best.pt
-export CFD_OPERATOR_DEVICE=cpu
-uvicorn cfd_operator.api.app:create_app_from_env --factory --host 127.0.0.1 --port 8000
-```
-
-示例请求：
+请求示例：
 
 ```bash
 curl -X POST http://127.0.0.1:8000/predict \
@@ -584,65 +567,43 @@ curl -X POST http://127.0.0.1:8000/predict \
   -d @examples/inference_input.json
 ```
 
-## 测试
+## 17. 测试
 
 ```bash
 pytest -q
 ```
 
-包含：
+当前测试覆盖：
 
-- 几何生成测试
-- 数据加载测试
-- 模型 forward shape 测试
-- physics residual shape 测试
-- loss 计算测试
-- smoke train test
-- analysis postprocess / surface / slice / feature / infer bundle 测试
+- geometry
+- data
+- losses
+- physics
+- postprocess
+- scalar outputs
+- surface outputs
+- slice outputs
+- feature outputs
+- inference smoke
+- evaluator smoke
+- DeepONet smoke train
+- Geo-FNO smoke train
 
-## 如何替换为真实 CFD 数据
+## 18. 当前局限
 
-建议按以下顺序接入：
+- 当前仍是 2D 翼型主线，不是 3D 系统
+- `heat_flux_surface` 和 `wall_shear_surface` 仍是近似代理
+- shock 相关量仍是高梯度近似，不是真实监督
+- physics loss 仍是 proxy 级约束，不是求解器离散格式
+- 标准 FNO 尚未在规则网格重采样路径下正式接入
+- Geo-FNO 在 CPU 上启用 physics loss 时代价较高，更适合 GPU
 
-1. 准备统一样本 schema。
-2. 为每个样本提供几何参数或几何编码。
-3. 将工况字段至少映射为 `mach`、`aoa`，必要时扩展 `reynolds`。
-4. 统一查询点表示。
-   - 非结构网格：采样点 / 点云
-   - 结构网格：规则网格，可后续切换 FNO
-5. 将求解输出映射到：
-   - `field_targets[..., 4] = [u, v, p, aux]`
-     - AirfRANS 路径：`aux = nut`
-     - toy/compressible 路径：`aux = rho`
-   - `surface_cp`
-   - `scalar_targets = [cl, cd]`
-6. 标注 `fidelity_level`、`source`、`convergence_flag`。
-7. 实现真实 reader，优先扩展 `src/cfd_operator/data/file_dataset.py`。
-8. 根据真实变量尺度重新检查 normalizer 和 loss 权重。
-9. 如果网格与几何耦合更强，优先扩展 GeoFNO / geometry encoder。
-10. 对 physics loss 重新校验单位、一致性和边界条件定义。
+## 19. 下一步改进方向
 
-## 当前局限
-
-- 仅支持二维参数化翼型。
-- 真实几何输入目前只完成了 NACA 4-digit 主路径。
-- physics-informed 残差是连续方程近似，不是离散 CFD scheme。
-- 没有显式粘性项、湍流模型、壁函数和 shock-aware 建模。
-- `heat_flux_surface` 和 `wall_shear_surface` 当前只是近似 proxy，不代表可直接用于热防护或摩擦阻力定量设计。
-- `shock_indicator` 和 `shock_location_summary` 当前是基于梯度的近似分析输出，不是专门的 shock tracking 算法。
-- toy 数据是规则生成的 pseudo-CFD 场，不代表真实数值求解器行为。
-- boundary consistency 当前仍是简化约束，不等同于完整边界条件离散实现。
-- AirfRANS 接入当前主要面向数据替换和工程验证，不代表已完成最优的不可压缩 RANS 专用建模。
-- multifidelity 只完成接口预留，未实现完整联合训练策略。
-- FNO / GeoFNO 仅有占位类，未给出可训练实现。
-- API 当前是同步推理，不含批任务队列、模型热更新、鉴权和观测性。
-
-## 下一步扩展方向
-
-- 接入真实 CFD 数据 reader 和数据版本管理
-- geometry encoder 从参数扩展到点云 / CST / CAD 派生表示
-- 完整 FNO / GeoFNO 实现
-- multifidelity trainer 与 residual transfer
-- shock/transonic-aware loss 设计
-- 更严格的边界条件 loss 与 wall/farfield sampling
-- experiment tracking、MLOps pipeline、容器化部署
+- 强化 `Geo-FNO` 的 scalar head，进一步压低 `cl/cd` 误差
+- 在 GPU 上重跑带 physics loss 的 Geo-FNO 对比
+- 继续统一 `pressure` 与 `cp_like` 的量纲处理
+- 改进 feature 伪标签，避免类别不平衡导致退化
+- 增强 surface 分支，进一步降低 `cp_surface_rmse`
+- 研究规则网格化后的标准 FNO baseline
+- 为后续 3D 推广准备几何编码、plane slice 和显存友好的采样方案

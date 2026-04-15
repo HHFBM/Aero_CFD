@@ -88,12 +88,27 @@ def _load_cgns_arrays(blob: bytes) -> dict[str, np.ndarray]:
             def read(path: str) -> np.ndarray:
                 return h5_file[path][()].astype(np.float32)
 
+            def read_optional(paths: list[str]) -> np.ndarray | None:
+                for path in paths:
+                    if path in h5_file:
+                        return h5_file[path][()].astype(np.float32)
+                return None
+
+            nut = read_optional(
+                [
+                    "Base_2_2/Zone/VertexFields/nut/ data",
+                    "Base_2_2/Zone/VertexFields/Nut/ data",
+                    "Base_2_2/Zone/VertexFields/nu_t/ data",
+                    "Base_2_2/Zone/VertexFields/nuTilda/ data",
+                ]
+            )
             return {
                 "x": read("Base_2_2/Zone/GridCoordinates/CoordinateX/ data"),
                 "y": read("Base_2_2/Zone/GridCoordinates/CoordinateY/ data"),
                 "u": read("Base_2_2/Zone/VertexFields/Ux/ data"),
                 "v": read("Base_2_2/Zone/VertexFields/Uy/ data"),
                 "p": read("Base_2_2/Zone/VertexFields/p/ data"),
+                "nut": nut,
                 "implicit_distance": read("Base_2_2/Zone/VertexFields/implicit_distance/ data"),
             }
 
@@ -113,7 +128,12 @@ class AirfRANSOriginalDatasetConverter:
         coords = np.stack([arrays["x"], arrays["y"]], axis=1).astype(np.float32)
         velocity = np.stack([arrays["u"], arrays["v"]], axis=1).astype(np.float32)
         pressure = arrays["p"].reshape(-1, 1).astype(np.float32)
-        rho = np.ones((coords.shape[0], 1), dtype=np.float32)
+        nut_raw = arrays["nut"]
+        nut = (
+            np.asarray(nut_raw, dtype=np.float32).reshape(-1, 1)
+            if nut_raw is not None
+            else np.zeros((coords.shape[0], 1), dtype=np.float32)
+        )
         implicit_distance = arrays["implicit_distance"]
 
         query_count = min(self.config.num_query_points, coords.shape[0])
@@ -149,16 +169,20 @@ class AirfRANSOriginalDatasetConverter:
 
         velocity_nd = velocity / max(inlet_velocity, 1.0e-6)
         pressure_nd = (pressure - p_inf) / dynamic_pressure
-        field_targets = np.concatenate([velocity_nd[query_indices], pressure_nd[query_indices], rho[query_indices]], axis=1)
+        nut_scale = max(float(np.quantile(np.abs(nut), 0.95)), 1.0e-6)
+        nut_nd = nut / nut_scale
+        field_targets = np.concatenate([velocity_nd[query_indices], pressure_nd[query_indices], nut_nd[query_indices]], axis=1)
         farfield_mask = _build_farfield_mask(query_points)
         surface_pressure = pressure[surface_reference_indices]
         surface_cp = ((surface_pressure - p_inf) / dynamic_pressure).astype(np.float32)
+        surface_velocity = velocity_nd[surface_reference_indices].astype(np.float32)
+        surface_nut = nut_nd[surface_reference_indices].astype(np.float32)
         farfield_targets = np.asarray(
             [
                 np.cos(np.deg2rad(aoa_deg)),
                 np.sin(np.deg2rad(aoa_deg)),
                 0.0,
-                1.0,
+                0.0,
             ],
             dtype=np.float32,
         )
@@ -188,6 +212,9 @@ class AirfRANSOriginalDatasetConverter:
             surface_normals=surface_normals,
             cp_reference=cp_reference,
             surface_cp=surface_cp,
+            surface_pressure=surface_pressure,
+            surface_velocity=surface_velocity,
+            surface_nut=surface_nut,
             scalar_targets=scalar_targets,
             fidelity_level=0,
             source=f"airfrans_original:{sample_name}",
@@ -305,7 +332,26 @@ class AirfRANSOriginalDatasetConverter:
             "surface_normals": np.stack([sample.surface_normals for sample in samples]).reshape(num_samples, num_surface_points, 2),
             "cp_reference": np.stack([sample.cp_reference for sample in samples]),
             "surface_cp": np.stack([sample.surface_cp for sample in samples]).reshape(num_samples, num_surface_points, 1),
+            "surface_pressure": np.stack([sample.surface_pressure for sample in samples]).reshape(num_samples, num_surface_points, 1),
+            "surface_velocity": np.stack([sample.surface_velocity for sample in samples]).reshape(num_samples, num_surface_points, 2),
+            "surface_nut": np.stack([sample.surface_nut for sample in samples]).reshape(num_samples, num_surface_points, 1),
             "scalar_targets": np.stack([sample.scalar_targets for sample in samples]),
+            "scalar_component_targets": np.zeros((num_samples, 5), dtype=np.float32),
+            "scalar_component_available": np.zeros((num_samples, 5), dtype=np.float32),
+            "surface_pressure_available": np.ones((num_samples, num_surface_points), dtype=np.float32),
+            "surface_velocity_available": np.ones((num_samples, num_surface_points), dtype=np.float32),
+            "surface_nut_available": np.ones((num_samples, num_surface_points), dtype=np.float32),
+            "nut_available": np.stack(
+                [
+                    np.full(
+                        (num_query_points,),
+                        1.0 if np.any(np.abs(sample.surface_nut) > 1.0e-10) else 0.0,
+                        dtype=np.float32,
+                    )
+                    for sample in samples
+                ]
+            ),
+            "field_names": np.asarray(self.config.field_names),
             "fidelity_level": np.asarray([sample.fidelity_level for sample in samples], dtype=np.int64),
             "source": np.asarray([sample.source for sample in samples]),
             "convergence_flag": np.asarray([sample.convergence_flag for sample in samples], dtype=np.int64),

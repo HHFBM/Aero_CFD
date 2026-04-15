@@ -1,9 +1,10 @@
-"""Autograd-based residuals for simplified steady 2D compressible Euler flow.
+"""Autograd-based residuals for simplified steady 2D flow surrogates.
 
 Assumptions:
 - 2D steady external flow
-- Inviscid approximation
-- Predictions are pointwise fields [u, v, p, rho]
+- Supports two primary modes:
+  - compressible Euler-like residuals for fields [u, v, p, rho]
+  - incompressible RANS-like proxy residuals for fields [u, v, p, nut]
 - Coordinates may be normalized before entering the model; derivative scaling is
   corrected using the coordinate normalizer standard deviation
 """
@@ -13,6 +14,7 @@ from __future__ import annotations
 from typing import Dict, Optional, Tuple
 
 import torch
+import torch.nn.functional as F
 
 
 def compute_gradients(
@@ -36,6 +38,19 @@ def compute_gradients(
     if coord_scale is not None:
         gradients = gradients / coord_scale.view(1, 1, -1)
     return gradients
+
+
+def laplacian(
+    values: torch.Tensor,
+    coords: torch.Tensor,
+    coord_scale: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
+    """Return scalar Laplacian with shape [B, N]."""
+
+    gradients = compute_gradients(values, coords, coord_scale=coord_scale)
+    grad_x = compute_gradients(gradients[..., 0], coords, coord_scale=coord_scale)
+    grad_y = compute_gradients(gradients[..., 1], coords, coord_scale=coord_scale)
+    return grad_x[..., 0] + grad_y[..., 1]
 
 
 def continuity_residual(
@@ -184,3 +199,63 @@ def compressible_euler_residuals(
             coord_scale=coord_scale,
         )
     return outputs
+
+
+def incompressible_continuity_residual(
+    u: torch.Tensor,
+    v: torch.Tensor,
+    coords: torch.Tensor,
+    coord_scale: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
+    grad_u = compute_gradients(u, coords, coord_scale=coord_scale)
+    grad_v = compute_gradients(v, coords, coord_scale=coord_scale)
+    return grad_u[..., 0] + grad_v[..., 1]
+
+
+def incompressible_rans_proxy_residuals(
+    predicted_fields: torch.Tensor,
+    coords: torch.Tensor,
+    coord_scale: Optional[torch.Tensor] = None,
+    laminar_viscosity: float = 1.0e-3,
+    nut_diffusivity: float = 5.0e-2,
+) -> Dict[str, torch.Tensor]:
+    """Compute a lightweight steady 2D incompressible RANS-like proxy residual.
+
+    This is not a full turbulence-model residual. It provides a physics-informed
+    regularizer compatible with AirfRANS-style fields [u, v, p, nut]:
+
+    - continuity: div(u) = 0
+    - momentum: convective acceleration + pressure gradient - nu_eff * Laplacian(u)
+    - nut transport proxy: advection - diffusivity * Laplacian(nut)
+    """
+
+    u = predicted_fields[..., 0]
+    v = predicted_fields[..., 1]
+    p = predicted_fields[..., 2]
+    nut = predicted_fields[..., 3]
+
+    grad_u = compute_gradients(u, coords, coord_scale=coord_scale)
+    grad_v = compute_gradients(v, coords, coord_scale=coord_scale)
+    grad_p = compute_gradients(p, coords, coord_scale=coord_scale)
+    grad_nut = compute_gradients(nut, coords, coord_scale=coord_scale)
+
+    continuity = grad_u[..., 0] + grad_v[..., 1]
+
+    nu_eff = laminar_viscosity + F.softplus(nut)
+    lap_u = laplacian(u, coords, coord_scale=coord_scale)
+    lap_v = laplacian(v, coords, coord_scale=coord_scale)
+    lap_nut = laplacian(nut, coords, coord_scale=coord_scale)
+
+    convective_u = u * grad_u[..., 0] + v * grad_u[..., 1]
+    convective_v = u * grad_v[..., 0] + v * grad_v[..., 1]
+
+    momentum_x = convective_u + grad_p[..., 0] - nu_eff * lap_u
+    momentum_y = convective_v + grad_p[..., 1] - nu_eff * lap_v
+    nut_transport = u * grad_nut[..., 0] + v * grad_nut[..., 1] - nut_diffusivity * lap_nut
+
+    return {
+        "continuity": continuity,
+        "momentum_x": momentum_x,
+        "momentum_y": momentum_y,
+        "nut_transport": nut_transport,
+    }

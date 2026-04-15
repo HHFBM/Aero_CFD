@@ -23,6 +23,7 @@ normalization:
   scalars: standard
 include_reynolds: true
 branch_feature_mode: params
+field_names: [u, v, p, nut]
 low_fidelity_enabled: false
 unseen_geometry_ratio: 0.15
 unseen_condition_ratio: 0.15

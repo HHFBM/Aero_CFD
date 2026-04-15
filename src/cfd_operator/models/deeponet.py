@@ -57,6 +57,7 @@ class FourierFeatureEncoder(nn.Module):
 class DeepONetOutput:
     fields: torch.Tensor
     scalars: torch.Tensor
+    features: torch.Tensor | None
     branch_latent: torch.Tensor
     trunk_latent: torch.Tensor
 
@@ -95,6 +96,11 @@ class DeepONetModel(BaseOperatorModel):
             _activation(config.activation),
             nn.Linear(config.scalar_head_hidden_dim, config.scalar_output_dim),
         )
+        self.feature_head: Optional[nn.Linear]
+        if config.feature_output_dim > 0:
+            self.feature_head = nn.Linear(config.latent_dim, config.feature_output_dim)
+        else:
+            self.feature_head = None
 
     def _encode_trunk(self, query_points: torch.Tensor) -> torch.Tensor:
         if self.fourier_encoder is not None:
@@ -108,9 +114,12 @@ class DeepONetModel(BaseOperatorModel):
         combined = branch_latent.unsqueeze(1) * trunk_latent
         fields = self.field_head(combined)
         scalars = self.scalar_head(branch_latent)
-        return {
+        outputs: dict[str, torch.Tensor] = {
             "fields": fields,
             "scalars": scalars,
             "branch_latent": branch_latent,
             "trunk_latent": trunk_latent,
         }
+        if self.feature_head is not None:
+            outputs["features"] = self.feature_head(combined)
+        return outputs

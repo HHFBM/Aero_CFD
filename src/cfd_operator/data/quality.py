@@ -20,6 +20,18 @@ REQUIRED_KEYS = {
     "surface_normals",
     "cp_reference",
     "surface_cp",
+    "surface_pressure",
+    "surface_velocity",
+    "surface_nut",
+    "surface_heat_flux",
+    "surface_wall_shear",
+    "surface_arc_length",
+    "slice_points",
+    "slice_fields",
+    "pressure_gradient_indicator",
+    "shock_indicator",
+    "high_gradient_mask",
+    "shock_location",
     "scalar_targets",
     "fidelity_level",
     "source",
@@ -55,6 +67,17 @@ def validate_dataset_payload(payload: Dict[str, Any], strict: bool = True) -> No
         "surface_normals",
         "cp_reference",
         "surface_cp",
+        "surface_pressure",
+        "surface_velocity",
+        "surface_nut",
+        "surface_heat_flux",
+        "surface_wall_shear",
+        "surface_arc_length",
+        "slice_points",
+        "slice_fields",
+        "pressure_gradient_indicator",
+        "shock_indicator",
+        "high_gradient_mask",
         "scalar_targets",
     ]:
         values = np.asarray(payload[array_key])
@@ -66,6 +89,18 @@ def validate_dataset_payload(payload: Dict[str, Any], strict: bool = True) -> No
     surface_normals = np.asarray(payload["surface_normals"])
     cp_reference = np.asarray(payload["cp_reference"])
     farfield_mask = np.asarray(payload["farfield_mask"])
+    slice_points = np.asarray(payload["slice_points"])
+    slice_fields = np.asarray(payload["slice_fields"])
+    pressure_gradient_indicator = np.asarray(payload["pressure_gradient_indicator"])
+    shock_indicator = np.asarray(payload["shock_indicator"])
+    high_gradient_mask = np.asarray(payload["high_gradient_mask"])
+    shock_location = np.asarray(payload["shock_location"])
+    shock_location_available = np.asarray(
+        payload.get(
+            "shock_location_available",
+            np.isfinite(shock_location[:, 0]).astype(np.float32),
+        )
+    ).reshape(-1)
 
     _ensure(query_points.ndim == 3 and query_points.shape[-1] == 2, "query_points must have shape [N, Q, 2]")
     _ensure(field_targets.ndim == 3 and field_targets.shape[-1] == 4, "field_targets must have shape [N, Q, 4]")
@@ -73,6 +108,17 @@ def validate_dataset_payload(payload: Dict[str, Any], strict: bool = True) -> No
     _ensure(surface_normals.shape == surface_points.shape, "surface_normals shape must match surface_points")
     _ensure(cp_reference.ndim == 2 and cp_reference.shape[-1] == 2, "cp_reference must have shape [N, 2]")
     _ensure(farfield_mask.shape == query_points.shape[:2], "farfield_mask must have shape [N, Q]")
+    _ensure(slice_points.ndim == 3 and slice_points.shape[-1] == 2, "slice_points must have shape [N, L, 2]")
+    _ensure(slice_fields.ndim == 3 and slice_fields.shape[-1] == 4, "slice_fields must have shape [N, L, 4]")
+    _ensure(pressure_gradient_indicator.shape == query_points.shape[:2] + (1,), "pressure_gradient_indicator must have shape [N, Q, 1]")
+    _ensure(shock_indicator.shape == query_points.shape[:2] + (1,), "shock_indicator must have shape [N, Q, 1]")
+    _ensure(high_gradient_mask.shape == query_points.shape[:2] + (1,), "high_gradient_mask must have shape [N, Q, 1]")
+    _ensure(shock_location.shape == (num_samples, 2), "shock_location must have shape [N, 2]")
+    if np.any(shock_location_available > 0.5):
+        _ensure(
+            np.isfinite(shock_location[shock_location_available > 0.5]).all(),
+            "Available shock_location entries must be finite",
+        )
 
     normal_norm = np.linalg.norm(surface_normals, axis=-1)
     _ensure(np.all(normal_norm > 1.0e-4), "surface_normals contain near-zero vectors")

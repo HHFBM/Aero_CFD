@@ -8,7 +8,7 @@ import numpy as np
 import torch
 
 
-@dataclass(slots=True)
+@dataclass
 class StandardNormalizer:
     mean: np.ndarray
     std: np.ndarray
@@ -55,4 +55,3 @@ class StandardNormalizer:
             mean=np.asarray(payload["mean"], dtype=np.float32),
             std=np.asarray(payload["std"], dtype=np.float32),
         )
-

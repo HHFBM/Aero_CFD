@@ -61,6 +61,7 @@ def _field_solution(
     points: np.ndarray,
     mach: float,
     aoa_deg: float,
+    auxiliary_field: str = "rho",
 ) -> np.ndarray:
     x = points[:, 0]
     y = points[:, 1]
@@ -89,17 +90,39 @@ def _field_solution(
     )
     p_inf = 1.0
     p = p_inf * np.clip(1.0 + 0.5 * gamma * mach**2 * cp_like, 0.35, 1.8)
-    rho = np.clip((p / p_inf) ** (1.0 / gamma), 0.45, 1.6)
-    return np.stack([u, v, p, rho], axis=1).astype(np.float32)
+    if auxiliary_field == "rho":
+        aux = np.clip((p / p_inf) ** (1.0 / gamma), 0.45, 1.6)
+    elif auxiliary_field == "nut":
+        boundary_layer = np.exp(-((y - yc) ** 2) / (0.01 + 6.0 * yt**2 + 1.0e-4))
+        wake_envelope = np.exp(-((x - 1.0) ** 2) / 0.22 - y**2 / 0.035)
+        aux = np.clip(
+            0.015 * envelope + 0.008 * wake + 0.01 * boundary_layer + 0.004 * wake_envelope,
+            0.0,
+            0.08,
+        )
+    else:
+        raise ValueError(f"Unsupported auxiliary field for synthetic data: {auxiliary_field}")
+    return np.stack([u, v, p, aux], axis=1).astype(np.float32)
 
 
-def _freestream_state(mach: float, aoa_deg: float, p_inf: float = 1.0, gamma: float = 1.4) -> np.ndarray:
+def _freestream_state(
+    mach: float,
+    aoa_deg: float,
+    auxiliary_field: str = "rho",
+    p_inf: float = 1.0,
+    gamma: float = 1.4,
+) -> np.ndarray:
     alpha = np.deg2rad(aoa_deg)
     v_inf = 1.0 + 0.6 * mach
     u_inf = v_inf * np.cos(alpha)
     v_inf_y = v_inf * np.sin(alpha)
-    rho_inf = np.clip((p_inf / p_inf) ** (1.0 / gamma), 0.45, 1.6)
-    return np.asarray([u_inf, v_inf_y, p_inf, rho_inf], dtype=np.float32)
+    if auxiliary_field == "rho":
+        aux_inf = np.clip((p_inf / p_inf) ** (1.0 / gamma), 0.45, 1.6)
+    elif auxiliary_field == "nut":
+        aux_inf = 0.0
+    else:
+        raise ValueError(f"Unsupported auxiliary field for synthetic data: {auxiliary_field}")
+    return np.asarray([u_inf, v_inf_y, p_inf, aux_inf], dtype=np.float32)
 
 
 def _surface_normals(surface_points: np.ndarray) -> np.ndarray:
@@ -127,7 +150,7 @@ def _farfield_mask(points: np.ndarray) -> np.ndarray:
     return mask.astype(np.float32)
 
 
-@dataclass(slots=True)
+@dataclass
 class SyntheticAirfoilDatasetGenerator:
     config: DataConfig
     seed: int = 42
@@ -150,6 +173,7 @@ class SyntheticAirfoilDatasetGenerator:
     def generate_samples(self) -> list[CFDSample]:
         rng = self._rng()
         geometries = self._build_geometry_pool(rng)
+        auxiliary_field = self.config.field_names[3]
         samples: list[CFDSample] = []
         for geometry_index, airfoil in enumerate(geometries):
             for _ in range(self.config.conditions_per_geometry):
@@ -164,8 +188,18 @@ class SyntheticAirfoilDatasetGenerator:
                 surface_normals = _surface_normals(surface_points)
                 surface_cp = _surface_cp_distribution(airfoil, surface_points, mach=mach, aoa_deg=aoa)
                 scalar_targets = _lift_drag_coefficients(airfoil, mach=mach, aoa_deg=aoa)
-                field_targets = _field_solution(airfoil, query_points, mach=mach, aoa_deg=aoa)
-                farfield_targets = _freestream_state(mach=mach, aoa_deg=aoa)
+                field_targets = _field_solution(
+                    airfoil,
+                    query_points,
+                    mach=mach,
+                    aoa_deg=aoa,
+                    auxiliary_field=auxiliary_field,
+                )
+                farfield_targets = _freestream_state(
+                    mach=mach,
+                    aoa_deg=aoa,
+                    auxiliary_field=auxiliary_field,
+                )
                 cp_reference = np.asarray([1.0, 0.5 * 1.4 * mach**2], dtype=np.float32)
 
                 geometry_params = airfoil.parameter_vector()
@@ -238,6 +272,7 @@ class SyntheticAirfoilDatasetGenerator:
             "surface_normals": np.stack([sample.surface_normals for sample in samples]).reshape(num_samples, num_surface_points, 2),
             "cp_reference": np.stack([sample.cp_reference for sample in samples]),
             "surface_cp": np.stack([sample.surface_cp for sample in samples]).reshape(num_samples, num_surface_points, 1),
+            "field_names": np.asarray(self.config.field_names),
             "scalar_targets": np.stack([sample.scalar_targets for sample in samples]),
             "fidelity_level": np.asarray([sample.fidelity_level for sample in samples], dtype=np.int64),
             "source": np.asarray([sample.source for sample in samples]),

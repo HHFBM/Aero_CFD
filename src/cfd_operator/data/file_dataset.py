@@ -34,9 +34,21 @@ def load_dataset_payload(path: str | Path) -> dict[str, Any]:
 def _group_tabular_records(table: pd.DataFrame) -> dict[str, Any]:
     if "sample_id" not in table.columns:
         raise ValueError("CSV/Parquet datasets require a 'sample_id' column.")
+    field_name_candidates = ["u", "v", "p"]
+    if "nut" in table.columns:
+        field_name_candidates.append("nut")
+    elif "rho" in table.columns:
+        field_name_candidates.append("rho")
+    else:
+        field_name_candidates.append("aux")
+
     grouped = table.groupby("sample_id")
     samples = []
     for sample_id, frame in grouped:
+        if field_name_candidates[3] == "aux":
+            auxiliary_values = np.zeros((frame.shape[0],), dtype=np.float32)
+        else:
+            auxiliary_values = frame[field_name_candidates[3]].to_numpy(dtype=np.float32)
         samples.append(
             {
                 "airfoil_id": str(sample_id),
@@ -46,7 +58,15 @@ def _group_tabular_records(table: pd.DataFrame) -> dict[str, Any]:
                     ["max_camber", "camber_position", "thickness", "chord", "mach", "aoa"]
                 ].iloc[0].to_numpy(dtype=np.float32),
                 "query_points": frame[["x", "y"]].to_numpy(dtype=np.float32),
-                "field_targets": frame[["u", "v", "p", "rho"]].to_numpy(dtype=np.float32),
+                "field_targets": np.stack(
+                    [
+                        frame["u"].to_numpy(dtype=np.float32),
+                        frame["v"].to_numpy(dtype=np.float32),
+                        frame["p"].to_numpy(dtype=np.float32),
+                        auxiliary_values,
+                    ],
+                    axis=1,
+                ),
                 "surface_points": frame.loc[frame["surface_flag"] == 1, ["x", "y"]].to_numpy(dtype=np.float32),
                 "surface_cp": frame.loc[frame["surface_flag"] == 1, ["cp"]].to_numpy(dtype=np.float32),
                 "scalar_targets": frame[["cl", "cd"]].iloc[0].to_numpy(dtype=np.float32),
@@ -55,5 +75,4 @@ def _group_tabular_records(table: pd.DataFrame) -> dict[str, Any]:
                 "convergence_flag": int(frame["convergence_flag"].iloc[0]),
             }
         )
-    return {"samples": samples}
-
+    return {"samples": samples, "field_names": np.asarray(field_name_candidates)}

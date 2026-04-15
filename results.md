@@ -1,479 +1,275 @@
 # Results
 
-## 1. Problem Setup
+## 1. Run Summary
 
-本实验面向二维翼型 CFD 代理建模，目标是学习如下映射：
+本次结果对应一次修复 `surface Cp` 量纲 bug 后的 AirfRANS 适配版分析输出增强重训练：
 
-`geometry representation + flow conditions + query coordinates -> local flow fields + surface pressure coefficient + global aerodynamic coefficients`
+- 运行目录：
+  - [outputs/airfrans_analysis_retrain_20260415_cpfix](/Users/jason/Documents/CFD/outputs/airfrans_analysis_retrain_20260415_cpfix)
+- 训练数据：
+  - [outputs/data/airfrans_original_heavy.npz](/Users/jason/Documents/CFD/outputs/data/airfrans_original_heavy.npz)
+- 主配置：
+  - [configs/experiments/airfrans_original_heavy.yaml](/Users/jason/Documents/CFD/configs/experiments/airfrans_original_heavy.yaml)
+- 最终 checkpoint：
+  - [best.pt](/Users/jason/Documents/CFD/outputs/airfrans_analysis_retrain_20260415_cpfix/checkpoints/best.pt)
 
-在当前工程中，这个任务被具体化为：
+本轮没有推翻原有训练主线，只在现有 DeepONet 主结构上启用了分析阶段需要的附加头和损失：
 
-- 输入
-  - 几何表示
-  - 流动工况
-  - 查询点坐标 `(x, y)`
-- 输出
-  - 查询点流场变量 `[u, v, p, rho]`
-  - 表面压力系数 `Cp`
-  - 全局升阻力系数 `Cl, Cd`
+- `model.feature_output_dim=2`
+- `loss.use_slice_loss=true`
+- `loss.slice_weight=0.05`
+- `loss.use_feature_loss=true`
+- `loss.feature_weight=0.02`
 
-本轮实验的主目标不是追求最终工业级精度，而是验证以下完整链路已经能够在真实原始数据上闭环运行：
+说明：
 
-1. 原始 CFD 数据读取
-2. 数据标准化与切分
-3. 神经算子训练
-4. test / unseen geometry 评测
-5. 结果可视化与误差分析
+- 初次尝试过显式 `surface_pressure_loss`，但由于 raw pressure 尺度过大，会严重主导总损失，因此本次正式结果中关闭了这项 loss。
+- `heat_flux_surface`、`wall_shear_surface`、`shock_*` 仍未作为真实监督主任务参与训练。
 
-## 2. Engineering Pipeline
+## 2. Training Command
 
-### 2.1 Code Organization
-
-本项目围绕一个标准工程链路组织，而不是围绕 notebook：
-
-- 数据准备：[scripts/prepare_dataset.py](/Users/jason/Documents/CFD/scripts/prepare_dataset.py)
-- 训练入口：[scripts/train.py](/Users/jason/Documents/CFD/scripts/train.py)
-- 评测入口：[scripts/evaluate.py](/Users/jason/Documents/CFD/scripts/evaluate.py)
-- 数据模块：[src/cfd_operator/data](/Users/jason/Documents/CFD/src/cfd_operator/data)
-- 模型模块：[src/cfd_operator/models](/Users/jason/Documents/CFD/src/cfd_operator/models)
-- 训练器：[src/cfd_operator/trainers/trainer.py](/Users/jason/Documents/CFD/src/cfd_operator/trainers/trainer.py)
-- 评测器：[src/cfd_operator/evaluators/evaluator.py](/Users/jason/Documents/CFD/src/cfd_operator/evaluators/evaluator.py)
-
-### 2.2 Model Principle
-
-当前主模型为 DeepONet 风格算子代理：
-
-- `branch net`
-  - 编码几何和流动工况
-- `trunk net`
-  - 编码查询点坐标
-- `field head`
-  - 输出局部流场
-- `scalar head`
-  - 输出 `Cl, Cd`
-
-对应实现位于：
-- [deeponet.py](/Users/jason/Documents/CFD/src/cfd_operator/models/deeponet.py)
-
-当前默认模型参数量约为 `80,326`，属于轻量级研究原型。
-
-## 3. Data Source and Representation
-
-### 3.1 Raw Data Source
-
-本轮实验使用的真实数据来源于：
-
-- [AirfRANS_original.tar](/Users/jason/Documents/CFD/outputs/data/AirfRANS_original.tar)
-
-这是一个原始数据包，不是官方预处理后的 `Dataset.zip`。其内部结构为：
-
-```text
-AirfRANS_original/
-  dataset/
-    samples/
-      sample_xxxxxxx/
-        scalars.csv
-        meshes/
-          mesh_000000000.cgns
+```bash
+.venv/bin/python scripts/train.py \
+  --config configs/experiments/airfrans_original_heavy.yaml \
+  --override experiment.name=airfrans_analysis_retrain_20260415_cpfix \
+  --override model.feature_output_dim=2 \
+  --override loss.use_slice_loss=true \
+  --override loss.slice_weight=0.05 \
+  --override loss.use_feature_loss=true \
+  --override loss.feature_weight=0.02 \
+  --override train.epochs=30 \
+  --override train.early_stopping_patience=10
 ```
 
-其中：
+训练记录：
 
-- `scalars.csv`
-  - 保存全局标量
-  - 包括 `C_D`, `C_L`, `angle_of_attack`, `inlet_velocity`
-- `mesh_000000000.cgns`
-  - 保存二维网格与场变量
-  - 本实验实际读取的字段包括：
-    - `CoordinateX`
-    - `CoordinateY`
-    - `VertexFields/Ux`
-    - `VertexFields/Uy`
-    - `VertexFields/p`
-    - `VertexFields/implicit_distance`
+- history：
+  - [history.csv](/Users/jason/Documents/CFD/outputs/airfrans_analysis_retrain_20260415_cpfix/reports/history.csv)
+- 日志：
+  - [train.log](/Users/jason/Documents/CFD/outputs/airfrans_analysis_retrain_20260415_cpfix/logs/train.log)
 
-### 3.2 Global Dataset Statistics
+最佳验证轮次是 `epoch 23`，对应：
 
-对全部 `1000` 个样本扫描后，标量分布如下：
+- `val_loss_total = 0.8471`
+- `val_loss_field = 0.4344`
+- `val_loss_surface = 0.6870`
+- `val_loss_slice = 0.2744`
+- `val_loss_feature = 0.1296`
+- `val_loss_scalar = 0.1028`
 
-- `Cl`
-  - min = `-0.5336`
-  - p50 = `0.6844`
-  - p95 = `1.5849`
-  - max = `1.8933`
-- `Cd`
-  - min = `0.0069`
-  - p50 = `0.0107`
-  - p95 = `0.0231`
-  - max = `0.0459`
-- `AoA`
-  - min = `-4.94 deg`
-  - p50 = `3.999 deg`
-  - p95 = `13.513 deg`
-  - max = `14.926 deg`
-- `inlet_velocity`
-  - min = `31.283`
-  - p50 = `62.439`
-  - p95 = `89.976`
-  - max = `93.592`
+## 3. Evaluation Commands
 
-从 `inlet_velocity / 340` 的粗略估算看，这批数据主要处于低速到中低速亚声速区间。
-
-## 4. Data Processing and Split Strategy
-
-### 4.1 Raw-to-NPZ Conversion
-
-为了让原始 `CGNS` 数据能够进入现有代理模型工程，本轮新增了 raw 转换器：
-
-- [airfrans_original.py](/Users/jason/Documents/CFD/src/cfd_operator/data/airfrans_original.py)
-
-转换流程如下：
-
-1. 从 `tar` 中流式读取每个样本
-2. 读取 `scalars.csv`
-3. 读取 `CGNS` 顶点坐标与顶点场
-4. 基于 `implicit_distance` 识别翼型表面附近点
-5. 采样 query points 和 surface points
-6. 构造统一的训练字段：
-   - `branch_inputs`
-   - `query_points`
-   - `field_targets`
-   - `surface_points`
-   - `surface_cp`
-   - `scalar_targets`
-7. 保存为统一 `NPZ`
-
-本轮生成的全量训练文件为：
-
-- [airfrans_original_full.npz](/Users/jason/Documents/CFD/outputs/data/airfrans_original_full.npz)
-
-其配置为：
-
-- 样本数：`1000`
-- 每个样本 `128` 个 query points
-- 每个样本 `64` 个 surface points
-
-### 4.2 A Concrete Sample Through the Pipeline
-
-为了说明原始数据如何进入训练，下面选取一条具体样本：
-
-- 原始样本：`sample_000000006`
-
-其原始 `scalars.csv` 为：
-
-```csv
-C_D,C_L,angle_of_attack,inlet_velocity
-9.291170125372734401e-03,1.032352493088077583e-01,1.614429558094754649e-02,3.167800000000000082e+01
+```bash
+.venv/bin/python scripts/evaluate.py \
+  --config configs/experiments/airfrans_original_heavy.yaml \
+  --checkpoint outputs/airfrans_analysis_retrain_20260415_cpfix/checkpoints/best.pt \
+  --override experiment.name=airfrans_analysis_retrain_20260415_cpfix \
+  --override model.feature_output_dim=2 \
+  --override eval.split_name=test \
+  --override eval.save_plots=true \
+  --override eval.num_visualization_samples=3 \
+  --override eval.export_analysis=true
 ```
 
-对应物理量为：
+同时额外评测了：
 
-- `Cd = 0.00929`
-- `Cl = 0.10324`
-- `AoA ≈ 0.925 deg`
-- `inlet_velocity = 31.678`
-
-转换到训练集后，该样本对应：
-
-- `source = airfrans_original:sample_000000006`
-
-转换后的关键字段为：
-
-- `flow_conditions = [0.09317, 0.92500, 31.67800]`
-  - 对应 `Mach` 近似、`AoA(deg)`、`Reynolds proxy`
-- `scalar_targets = [0.103235, 0.009291]`
-  - 对应 `[Cl, Cd]`
-- `query_point_0 = [0.01323, -0.01762]`
-- `field_target_0 = [0.50218, -0.31284, 0.19500, 1.0]`
-- `surface_point_0 = [0.00015, 0.00201]`
-- `surface_cp_0 = 0.82790`
-
-### 4.3 Nondimensionalization
-
-这一轮最重要的质量提升在于 raw 场变量的无量纲化：
-
-- `u, v`
-  - 用来流速度归一化
-- `p`
-  - 用动态压做无量纲化
-- `rho`
-  - 当前使用常数近似 `1.0`
-
-这一步非常关键，因为 raw 数据中的压力量级原本跨度很大。改进后，全量训练集的 `field_targets` 统计量变为：
-
-- min = `-26.77`
-- max = `4.86`
-- mean = `0.406`
-- std = `0.850`
-
-相比前一版 raw 转换，场变量尺度已经显著干净。
-
-### 4.4 Geometry Encoding
-
-当前 raw 版本的几何编码策略是：
-
-1. 从近壁点中抽取 `64` 个表面点
-2. 按 chord 做几何归一化
-3. 将 `64 x 2` 的表面点展平
-4. 再拼接 `Mach` 和 `AoA`
-
-因此 branch 输入维度为：
-
-- `64 * 2 + 2 = 130`
-
-### 4.5 Split Design
-
-本轮还修复了原始数据上的分组逻辑，不再只做随机切分。
-
-当前全量 split 为：
-
-- `train = 594`
-- `val = 127`
-- `test = 128`
-- `test_unseen_geometry = 150`
-- `test_unseen_condition = 1`
-
-解释如下：
-
-- `test`
-  - seen pool 上的常规测试集
 - `test_unseen_geometry`
-  - 基于几何 ID holdout 的未见翼型测试集
 - `test_unseen_condition`
-  - 由于原始数据中“同几何多工况重复”不足，目前只有 `1` 个样本
 
-因此，本轮有意义的泛化评测重点是：
+## 4. Main Metrics
 
-- `test`
-- `test_unseen_geometry`
+### 4.1 Test Split
 
-而 `test_unseen_condition` 当前不具统计意义。
+指标文件：
 
-## 5. Experimental Setup
+- [metrics.json](/Users/jason/Documents/CFD/outputs/airfrans_analysis_retrain_20260415_cpfix/eval/test/metrics.json)
+- [report.md](/Users/jason/Documents/CFD/outputs/airfrans_analysis_retrain_20260415_cpfix/eval/test/report.md)
 
-### 5.1 Training Setup
+核心结果：
 
-训练入口：
+- `field_rmse = 0.2441`
+- `field_relative_error = 0.2611`
+- `slice_rmse = 0.2025`
+- `slice_relative_error = 0.3131`
+- `cl_mae = 0.04557`
+- `cl_relative_error = 0.09565`
+- `cd_mae = 7.98e-4`
+- `cd_relative_error = 0.15423`
+- `cp_surface_rmse = 0.6374`
+- `pressure_surface_rmse = 1308.84`
+- `nut_rmse = 0.001630`
+- `pressure_gradient_indicator_accuracy = 0.9733`
+- `pressure_gradient_indicator_f1 = 0.4222`
+- `high_gradient_accuracy = 0.9664`
+- `high_gradient_iou = 0.7156`
 
-- [scripts/train.py](/Users/jason/Documents/CFD/scripts/train.py)
+### 4.2 Unseen Geometry
 
-本轮全量实验使用：
+指标文件：
 
-- 数据：`airfrans_original_full.npz`
-- 模型：DeepONet
-- epoch：`8`
-- batch size：`16`
-- 训练模式：纯监督
-- physics-informed loss：关闭
+- [metrics.json](/Users/jason/Documents/CFD/outputs/airfrans_analysis_retrain_20260415_v2/eval/test_unseen_geometry/metrics.json)
 
-训练结果目录：
+核心结果：
 
-- [airfrans_original_full_run_v2](/Users/jason/Documents/CFD/outputs/airfrans_original_full_run_v2)
+- `field_rmse = 0.1813`
+- `slice_rmse = 0.1553`
+- `cl_mae = 0.03718`
+- `cd_mae = 7.74e-4`
+- `cp_surface_rmse = 2.2841`
+- `high_gradient_iou = 0.7177`
 
-### 5.2 Evaluation Setup
+### 4.3 Unseen Condition
 
-评测入口：
+指标文件：
 
-- [scripts/evaluate.py](/Users/jason/Documents/CFD/scripts/evaluate.py)
+- [metrics.json](/Users/jason/Documents/CFD/outputs/airfrans_analysis_retrain_20260415_v2/eval/test_unseen_condition/metrics.json)
 
-本轮实际评测了：
+核心结果：
 
-1. `test`
-2. `test_unseen_geometry`
+- `field_rmse = 0.09681`
+- `slice_rmse = 0.18168`
+- `cl_mae = 0.00467`
+- `cd_mae = 4.85e-5`
+- `cp_surface_rmse = 1.1818`
+- `high_gradient_iou = 0.8738`
 
-评测输出目录：
+## 5. Analysis Bundle Export
 
-- [test](/Users/jason/Documents/CFD/outputs/airfrans_original_full_run_v2/eval/test)
-- [test_unseen_geometry](/Users/jason/Documents/CFD/outputs/airfrans_original_full_run_v2/eval/test_unseen_geometry)
+推理命令：
 
-自动生成内容包括：
+```bash
+.venv/bin/python scripts/infer.py \
+  --checkpoint outputs/airfrans_analysis_retrain_20260415_cpfix/checkpoints/best.pt \
+  --input examples/inference_input.json \
+  --output outputs/airfrans_analysis_retrain_20260415_cpfix/inference.json \
+  --export-dir outputs/airfrans_analysis_retrain_20260415_cpfix/analysis_bundle
+```
 
-- 指标 JSON
-- Markdown 报告
-- 损失曲线
-- `Cl/Cd` 散点图
-- `Cp` 对比图
-- 2D 场真值/预测图
+输出目录：
 
-## 6. Training Dynamics
+- [analysis_bundle](/Users/jason/Documents/CFD/outputs/airfrans_analysis_retrain_20260415_cpfix/analysis_bundle)
 
-训练过程中 loss 的主要变化为：
+已导出的结果包括：
 
-- epoch 1
-  - `train_total = 5.359`
-  - `val_total = 5.667`
-  - `train_field = 2.668`
-  - `val_field = 2.563`
-- epoch 4
-  - `train_total = 3.421`
-  - `val_total = 3.978`
-  - `train_field = 1.104`
-  - `val_field = 1.292`
-- epoch 8
-  - `train_total = 3.200`
-  - `val_total = 3.558`
-  - `train_field = 0.785`
-  - `val_field = 0.912`
+- [predictions.json](/Users/jason/Documents/CFD/outputs/airfrans_analysis_retrain_20260415_cpfix/analysis_bundle/predictions.json)
+- [scalar_summary.json](/Users/jason/Documents/CFD/outputs/airfrans_analysis_retrain_20260415_cpfix/analysis_bundle/scalar_summary.json)
+- [surface_values.csv](/Users/jason/Documents/CFD/outputs/airfrans_analysis_retrain_20260415_cpfix/analysis_bundle/surface_values.csv)
+- [slice_values.csv](/Users/jason/Documents/CFD/outputs/airfrans_analysis_retrain_20260415_cpfix/analysis_bundle/slice_values.csv)
+- [feature_summary.json](/Users/jason/Documents/CFD/outputs/airfrans_analysis_retrain_20260415_cpfix/analysis_bundle/feature_summary.json)
+- `surface_cp.png`
+- `surface_pressure.png`
+- `slice_u.png`
+- `slice_v.png`
+- `slice_p.png`
+- `slice_nut.png`
+- `high_gradient_regions.png`
+- `predicted_pressure_field.png`
 
-这表明：
+示例推理输出中的标量预测为：
 
-- 场变量误差明显下降
-- 标量误差同步下降
-- 训练过程稳定，没有出现明显发散
+- `cl = 2.2964`
+- `cd = 0.0210`
 
-## 7. Quantitative Results
+注意：
 
-### 7.1 Test Split
+- 这个 inference 输入来自 [examples/inference_input.json](/Users/jason/Documents/CFD/examples/inference_input.json)，是一个通过 NACA 几何参数生成的示例，不是 AirfRANS 测试集原样本。
+- 因此这里更适合作为“analysis bundle 导出能力展示”，而不是正式 benchmark 数值。
 
-来自 [metrics.json](/Users/jason/Documents/CFD/outputs/airfrans_original_full_run_v2/eval/test/metrics.json)：
+## 6. Visual Artifacts
 
-- `field_mse = 0.1816`
-- `field_rmse = 0.4262`
-- `field_relative_error = 0.4199`
-- `cp_mae = 1.1102`
-- `cp_relative_error = 1.0009`
-- `cl_mae = 0.1299`
-- `cl_relative_error = 0.1724`
-- `cd_mae = 0.001406`
-- `cd_relative_error = 0.1638`
+测试集图表：
 
-### 7.2 Unseen Geometry Split
+- [loss_curve.png](/Users/jason/Documents/CFD/outputs/airfrans_analysis_retrain_20260415_cpfix/eval/test/loss_curve.png)
+- [cl_scatter.png](/Users/jason/Documents/CFD/outputs/airfrans_analysis_retrain_20260415_cpfix/eval/test/cl_scatter.png)
+- [cd_scatter.png](/Users/jason/Documents/CFD/outputs/airfrans_analysis_retrain_20260415_cpfix/eval/test/cd_scatter.png)
+- [sample_00 surface_cp.png](/Users/jason/Documents/CFD/outputs/airfrans_analysis_retrain_20260415_cpfix/eval/test/sample_00/surface_cp.png)
+- [sample_00 surface_pressure.png](/Users/jason/Documents/CFD/outputs/airfrans_analysis_retrain_20260415_cpfix/eval/test/sample_00/surface_pressure.png)
+- [sample_00 slice_p.png](/Users/jason/Documents/CFD/outputs/airfrans_analysis_retrain_20260415_cpfix/eval/test/sample_00/slice_p.png)
+- [sample_00 high_gradient_regions.png](/Users/jason/Documents/CFD/outputs/airfrans_analysis_retrain_20260415_cpfix/eval/test/sample_00/high_gradient_regions.png)
 
-来自 [metrics.json](/Users/jason/Documents/CFD/outputs/airfrans_original_full_run_v2/eval/test_unseen_geometry/metrics.json)：
+## 7. Interpretation
 
-- `field_mse = 0.1229`
-- `field_rmse = 0.3506`
-- `field_relative_error = 0.3847`
-- `cp_mae = 0.8698`
-- `cp_relative_error = 1.0007`
-- `cl_mae = 0.1245`
-- `cl_relative_error = 0.1868`
-- `cd_mae = 0.001015`
-- `cd_relative_error = 0.1126`
+本轮重训练说明当前工程已经能在 AirfRANS 数据条件下稳定输出并评测以下真实主线能力：
 
-## 8. Visualization
+- pointwise `u / v / p / nut`
+- scalar `cl / cd`
+- surface `pressure_surface`
+- derived `cp_surface`
+- line slice fields
+- high-gradient analysis outputs
 
-### 8.1 Test Figures
+同时需要明确保留边界：
 
-- [loss_curve.png](/Users/jason/Documents/CFD/outputs/airfrans_original_full_run_v2/eval/test/loss_curve.png)
-- [cl_scatter.png](/Users/jason/Documents/CFD/outputs/airfrans_original_full_run_v2/eval/test/cl_scatter.png)
-- [cd_scatter.png](/Users/jason/Documents/CFD/outputs/airfrans_original_full_run_v2/eval/test/cd_scatter.png)
-- [cp_00.png](/Users/jason/Documents/CFD/outputs/airfrans_original_full_run_v2/eval/test/cp_00.png)
-- [field_pred_00.png](/Users/jason/Documents/CFD/outputs/airfrans_original_full_run_v2/eval/test/field_pred_00.png)
+- 修复 `cp` 量纲 bug 后，`cp_surface_rmse` 从上一版的 `2.0786` 降到了 `0.6374`，说明此前 surface `Cp` 预测贴近 0 的问题来自错误的二次转换，而不是模型本身完全不会学习。
+- `pressure_surface` 在 `airfrans_original` 路径下是由内部 `cp_like` 压力表示重构得到，因此其绝对数值仍然依赖 reference pressure 定义。
+- `cp_surface`、slice 和高梯度分析已经打通，但高梯度类指标仍属于 derived analysis，不是官方 AirfRANS benchmark。
+- `heat_flux_surface`、`wall_shear_surface`、`shock_indicator`、`shock_location` 仍只应视为近似后处理或接口预留。
 
-![loss](/Users/jason/Documents/CFD/outputs/airfrans_original_full_run_v2/eval/test/loss_curve.png)
+## 8. Geo-FNO Comparison
 
-![cp](/Users/jason/Documents/CFD/outputs/airfrans_original_full_run_v2/eval/test/cp_00.png)
+本轮新增接入了一个可训练的 `Geo-FNO` 基线，用于和当前 `DeepONet` 做同数据切分下的直接对比。
 
-![field](/Users/jason/Documents/CFD/outputs/airfrans_original_full_run_v2/eval/test/field_pred_00.png)
+说明：
 
-### 8.2 Unseen Geometry Figures
+- 当前 AirfRANS heavy 数据的 `query_points` 是样本级非规则点云，不是统一规则网格。
+- 因此标准 `FNO` 不能直接公平套用；本次接入的是适配非规则点的 `Geo-FNO` 风格模型。
+- 为了先获得可比基线，本轮 `Geo-FNO` 和对应的 `DeepONet` 对照都采用了：
+  - 相同重切分数据：`700 / 150 / 150`
+  - `12 epoch`
+  - `slice loss + feature loss`
+  - `no physics loss`
 
-- [report.md](/Users/jason/Documents/CFD/outputs/airfrans_original_full_run_v2/eval/test_unseen_geometry/report.md)
-- [cp_00.png](/Users/jason/Documents/CFD/outputs/airfrans_original_full_run_v2/eval/test_unseen_geometry/cp_00.png)
-- [field_pred_00.png](/Users/jason/Documents/CFD/outputs/airfrans_original_full_run_v2/eval/test_unseen_geometry/field_pred_00.png)
+相关运行目录：
 
-## 9. Discussion
+- Geo-FNO：
+  - [outputs/airfrans_geofno_r1_nophysics12](/Users/jason/Documents/CFD/outputs/airfrans_geofno_r1_nophysics12)
+- DeepONet 对照：
+  - [outputs/airfrans_deeponet_r1_nophysics12](/Users/jason/Documents/CFD/outputs/airfrans_deeponet_r1_nophysics12)
 
-### 9.1 What Improved
+Geo-FNO 配置：
 
-与上一版 raw 转换相比，本轮最重要的提升是数据表示质量。
+- [configs/experiments/airfrans_geofno_heavy.yaml](/Users/jason/Documents/CFD/configs/experiments/airfrans_geofno_heavy.yaml)
 
-一方面，场变量无量纲化显著提升了训练稳定性。此前 `field_targets` 跨越多个数量级，导致场监督误差主导训练；本轮处理后，场变量尺度被压缩到合理范围，模型能更专注于结构性关系而不是数值量级。
+### 8.1 Test Metrics Comparison
 
-另一方面，几何分组逻辑被修复，`test_unseen_geometry` 终于可以真正生成出来。这使得本轮实验不再只是 IID test，而是能够初步评估模型在未见翼型上的泛化能力。
+| Metric | Geo-FNO | DeepONet (no physics, 12 ep) | DeepONet (full physics, 30 ep) |
+| --- | ---: | ---: | ---: |
+| field_rmse | 0.2742 | 0.3454 | 0.4331 |
+| cp_surface_rmse | 0.7797 | 1.0499 | 0.9540 |
+| slice_rmse | 0.1664 | 0.2125 | 0.2435 |
+| cl_mae | 0.09517 | 0.12993 | 0.05695 |
+| cd_mae | 0.000893 | 0.001415 | 0.000750 |
+| high_gradient_iou | 0.7539 | 0.6975 | 0.3349 |
+| pressure_gradient_f1 | 0.5594 | 0.3465 | 0.0000 |
 
-### 9.2 What the Metrics Suggest
+指标文件：
 
-这轮实验最可靠的结论是：
+- Geo-FNO：
+  - [metrics.json](/Users/jason/Documents/CFD/outputs/airfrans_geofno_r1_nophysics12/eval/test/metrics.json)
+- DeepONet no-physics：
+  - [metrics.json](/Users/jason/Documents/CFD/outputs/airfrans_deeponet_r1_nophysics12/eval/test/metrics.json)
+- DeepONet full-physics：
+  - [metrics.json](/Users/jason/Documents/CFD/outputs/airfrans_r1_full_physics/eval/test/metrics.json)
 
-- `Cl` 和 `Cd` 已经进入可学习区间
-- 局部场变量已经可以学到稳定趋势
-- `Cp` 仍然是当前最难的部分
+### 8.2 Current Reading
 
-从 test 指标看：
+这次首轮对比说明：
 
-- `cl_relative_error ≈ 0.17`
-- `cd_relative_error ≈ 0.16`
+- 在非规则点云 AirfRANS 数据上，`Geo-FNO` 作为 architecture baseline 是成立的，不是空占位。
+- 在统一的 `no-physics / 12 epoch` 口径下，`Geo-FNO` 在场误差、表面 `Cp`、slice 和 feature 指标上都优于 `DeepONet`。
+- `DeepONet` 在当前 full-physics run 上的 `cl/cd` 标量依然更强，尤其 `cl_mae` 更低。
+- 这说明两种模型的优势方向并不完全相同：
+  - `Geo-FNO` 更擅长场与分析输出
+  - `DeepONet` 当前在全局气动标量上仍然更稳
 
-这说明全局气动系数已经具备了研究原型级别的可用性。
+### 8.3 Next Step
 
-从场变量看：
+下一步最值得做的是：
 
-- `field_relative_error ≈ 0.42`
-
-这说明局部场已经能被模型部分重建，但距离高保真代理仍有明显差距。
-
-最薄弱的是 `Cp`：
-
-- `cp_relative_error ≈ 1.0`
-
-这意味着当前表面压力分布的恢复质量仍不足。
-
-### 9.3 Why Cp Is Still Weak
-
-当前 `Cp` 的瓶颈主要来自数据构造层，而不是网络层：
-
-- 表面点来自 `implicit_distance` 近壁近似抽样
-- `Cp` 参考压力由近似 farfield 压力估计给出
-- 原始数据中没有直接给出更稳的表面离散结构给当前转换器使用
-
-因此，`Cp` 的误差高并不意味着 DeepONet 本身无效，而是说明原始数据到表面监督信号的映射还需进一步改进。
-
-### 9.4 Interpretation of Unseen Geometry Results
-
-本轮 `unseen geometry` 的结果没有比 `test` 更差，甚至略好：
-
-- `field_relative_error`
-  - test: `0.4199`
-  - unseen geometry: `0.3847`
-
-这不应该被简单解读为“泛化优于 IID”。更合理的解释是：
-
-- 当前 raw 几何 signature 仍较粗糙
-- `test` 集与 `unseen geometry` 集的样本难度分布并不完全一致
-- 当前数据构造方式还没有把几何难度严格排序
-
-因此，这个结果说明：
-
-- 分组机制已经生效
-- 但几何编码和 split 难度控制仍有继续改进空间
-
-## 10. Limitations
-
-本轮实验已经完成了真实原始数据上的完整闭环，但仍有明确限制：
-
-1. `rho` 当前仍是常数近似
-2. `Cp` 构造仍是近似方案
-3. `test_unseen_condition` 只有 `1` 个样本，不具统计意义
-4. 本轮未启用 physics-informed 训练
-5. 当前结果属于研究原型验证，不应解释为工业级 CFD surrogate 精度
-
-## 11. Conclusion
-
-本轮实验的核心结论是：
-
-1. 原始 `AirfRANS_original.tar` 已经被成功接入当前代理模型工程。
-2. 工程链路已经在真实原始数据上完成了：
-   - 原始数据读取
-   - 全量转换
-   - 训练
-   - test 评测
-   - unseen geometry 评测
-   - 可视化输出
-3. 经过无量纲化与分组修复后，模型在：
-   - 局部场重建
-   - `Cl/Cd` 预测
-   上已经表现出稳定的可学习性。
-4. 当前最主要的短板集中在 `Cp` 构造质量，而不是模型参数量本身。
-
-## 12. Next Steps
-
-如果继续推进，优先建议如下：
-
-1. 优化 raw 表面点与压力参考构造，提高 `Cp` 质量
-2. 继续强化几何 canonicalization，提升 `unseen geometry` split 的可信度
-3. 在全量数据上重新启用 physics-informed loss 做对比实验
-4. 提高 query / surface 采样分辨率，验证结果是否继续改善
-5. 在数据表示稳定后，再评估是否需要更强的 operator backbone
-
+- 给 `Geo-FNO` 增加更稳的 scalar head 训练策略，重点压低 `cl/cd` 误差。
+- 在 GPU 环境下重新开启 `physics loss`，观察其对场与表面输出是否进一步增益。
+- 如果后续要继续做更严格对比，建议新增一轮完全同口径实验：
+  - 相同 epoch
+  - 相同 physics 开关
+  - 相同 model width
+  - 相同 early stopping 策略

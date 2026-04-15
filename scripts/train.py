@@ -31,11 +31,15 @@ def main() -> None:
     config.model.trunk_input_dim = int(data_module.payload["query_points"].shape[-1])
 
     model = create_model(config.model)
-    loss_fn = CompositeLoss(config=config.loss, normalizers=data_module.normalizers)
+    loss_fn = CompositeLoss(
+        config=config.loss,
+        normalizers=data_module.normalizers,
+        field_names=config.data.field_names,
+        pressure_target_mode=config.data.pressure_target_mode,
+    )
     trainer = Trainer(config=config, model=model, data_module=data_module, loss_fn=loss_fn)
     trainer.fit()
 
 
 if __name__ == "__main__":
     main()
-

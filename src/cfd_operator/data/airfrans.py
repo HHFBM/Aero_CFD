@@ -87,6 +87,10 @@ def _cp_reference_for_airfrans(inlet_velocity: float) -> np.ndarray:
     return np.asarray([0.0, 0.5 * inlet_velocity**2], dtype=np.float32)
 
 
+def _scalar_components_placeholder() -> np.ndarray:
+    return np.zeros((5,), dtype=np.float32)
+
+
 def _download_file_with_fallback(url: str, destination: Path) -> None:
     destination.parent.mkdir(parents=True, exist_ok=True)
     try:
@@ -168,13 +172,15 @@ class AirfRANSDatasetConverter:
         query_points = mesh_sample[:, 0:2].astype(np.float32)
         velocity = mesh_sample[:, 8:10].astype(np.float32)
         pressure = mesh_sample[:, 10:11].astype(np.float32)
-        rho = np.full((mesh_sample.shape[0], 1), float(simulation.RHO), dtype=np.float32)
-        field_targets = np.concatenate([velocity, pressure, rho], axis=1).astype(np.float32)
+        nut = mesh_sample[:, 11:12].astype(np.float32) if mesh_sample.shape[1] >= 12 else np.zeros((mesh_sample.shape[0], 1), dtype=np.float32)
+        field_targets = np.concatenate([velocity, pressure, nut], axis=1).astype(np.float32)
 
         surface_sample = simulation.sampling_surface(seed=seed + 10_000, n=self.config.num_surface_points, targets=True)
         surface_points = surface_sample[:, 0:2].astype(np.float32)
         surface_normals = surface_sample[:, 2:4].astype(np.float32)
-        surface_pressure = surface_sample[:, 6:7].astype(np.float32)
+        surface_velocity = surface_sample[:, 4:6].astype(np.float32) if surface_sample.shape[1] >= 6 else np.zeros((surface_sample.shape[0], 2), dtype=np.float32)
+        surface_pressure = surface_sample[:, 6:7].astype(np.float32) if surface_sample.shape[1] >= 7 else np.zeros((surface_sample.shape[0], 1), dtype=np.float32)
+        surface_nut = surface_sample[:, 7:8].astype(np.float32) if surface_sample.shape[1] >= 8 else np.zeros((surface_sample.shape[0], 1), dtype=np.float32)
         cp_reference = _cp_reference_for_airfrans(simulation.inlet_velocity)
         surface_cp = (surface_pressure - cp_reference[0]) / max(float(cp_reference[1]), 1.0e-6)
         surface_cp = surface_cp.astype(np.float32)
@@ -194,7 +200,7 @@ class AirfRANSDatasetConverter:
                 simulation.inlet_velocity * np.cos(alpha),
                 simulation.inlet_velocity * np.sin(alpha),
                 0.0,
-                float(simulation.RHO),
+                0.0,
             ],
             dtype=np.float32,
         )
@@ -212,6 +218,9 @@ class AirfRANSDatasetConverter:
             surface_normals=surface_normals,
             cp_reference=cp_reference,
             surface_cp=surface_cp,
+            surface_pressure=surface_pressure,
+            surface_velocity=surface_velocity,
+            surface_nut=surface_nut,
             scalar_targets=scalar_targets,
             fidelity_level=1,
             source=f"airfrans:{self.config.airfrans_task}",
@@ -263,7 +272,16 @@ class AirfRANSDatasetConverter:
             "surface_normals": np.stack([sample.surface_normals for sample in samples]).reshape(num_samples, num_surface_points, 2),
             "cp_reference": np.stack([sample.cp_reference for sample in samples]),
             "surface_cp": np.stack([sample.surface_cp for sample in samples]).reshape(num_samples, num_surface_points, 1),
+            "surface_pressure": np.stack([sample.surface_pressure for sample in samples]).reshape(num_samples, num_surface_points, 1),
+            "surface_velocity": np.stack([sample.surface_velocity for sample in samples]).reshape(num_samples, num_surface_points, 2),
+            "surface_nut": np.stack([sample.surface_nut for sample in samples]).reshape(num_samples, num_surface_points, 1),
             "scalar_targets": np.stack([sample.scalar_targets for sample in samples]),
+            "scalar_component_targets": np.zeros((num_samples, 5), dtype=np.float32),
+            "scalar_component_available": np.zeros((num_samples, 5), dtype=np.float32),
+            "surface_pressure_available": np.ones((num_samples, num_surface_points), dtype=np.float32),
+            "surface_velocity_available": np.ones((num_samples, num_surface_points), dtype=np.float32),
+            "surface_nut_available": np.ones((num_samples, num_surface_points), dtype=np.float32),
+            "field_names": np.asarray(self.config.field_names),
             "fidelity_level": np.asarray([sample.fidelity_level for sample in samples], dtype=np.int64),
             "source": np.asarray([sample.source for sample in samples]),
             "convergence_flag": np.asarray([sample.convergence_flag for sample in samples], dtype=np.int64),

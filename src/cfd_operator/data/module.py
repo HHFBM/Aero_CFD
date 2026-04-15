@@ -11,6 +11,7 @@ from torch.utils.data import DataLoader
 
 from cfd_operator.config.schemas import DataConfig
 from cfd_operator.data.collate import cfd_collate_fn
+from cfd_operator.data.analysis import ensure_analysis_payload
 from cfd_operator.data.dataset import CFDOperatorDataset
 from cfd_operator.data.file_dataset import load_dataset_payload
 from cfd_operator.data.normalization import StandardNormalizer
@@ -21,7 +22,7 @@ from cfd_operator.data.synthetic import SyntheticAirfoilDatasetGenerator
 from cfd_operator.utils.io import ensure_dir
 
 
-@dataclass(slots=True)
+@dataclass
 class NormalizerBundle:
     branch: StandardNormalizer
     coordinates: StandardNormalizer
@@ -77,6 +78,7 @@ class CFDDataModule:
     def setup(self) -> None:
         dataset_path = self.prepare_data()
         self.payload = load_dataset_payload(dataset_path)
+        self.payload = ensure_analysis_payload(self.payload)
         if self.config.strict_quality_checks:
             try:
                 validate_dataset_payload(self.payload, strict=True)

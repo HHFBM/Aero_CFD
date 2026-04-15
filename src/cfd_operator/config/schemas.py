@@ -49,6 +49,8 @@ class DataConfig(BaseModel):
     normalization: NormalizationConfig = Field(default_factory=NormalizationConfig)
     include_reynolds: bool = False
     branch_feature_mode: Literal["params", "points"] = "params"
+    field_names: Tuple[str, str, str, str] = ("u", "v", "p", "rho")
+    pressure_target_mode: Literal["raw", "cp_like"] = "raw"
     low_fidelity_enabled: bool = False
     unseen_geometry_ratio: float = 0.15
     unseen_condition_ratio: float = 0.15
@@ -76,6 +78,7 @@ class ModelConfig(BaseModel):
     trunk_input_dim: int = 2
     field_output_dim: int = 4
     scalar_output_dim: int = 2
+    feature_output_dim: int = 0
     hidden_dim: int = 128
     latent_dim: int = 128
     branch_layers: int = 3
@@ -113,11 +116,25 @@ class TrainConfig(BaseModel):
 class LossConfig(BaseModel):
     field_weight: float = 1.0
     surface_weight: float = 0.5
+    surface_pressure_weight: float = 0.0
+    heat_flux_weight: float = 0.0
+    wall_shear_weight: float = 0.0
     scalar_weight: float = 0.5
+    slice_weight: float = 0.0
+    feature_weight: float = 0.0
+    shock_location_weight: float = 0.0
     physics_weight: float = 0.1
     boundary_weight: float = 0.05
     field_loss_type: Literal["mse", "mae"] = "mse"
     scalar_loss_type: Literal["mse", "mae"] = "mse"
+    surface_loss_type: Literal["mse", "mae"] = "mse"
+    feature_loss_type: Literal["bce", "mse"] = "bce"
+    use_surface_pressure_loss: bool = False
+    use_heat_flux_loss: bool = False
+    use_wall_shear_loss: bool = False
+    use_slice_loss: bool = False
+    use_feature_loss: bool = False
+    use_shock_location_loss: bool = False
     use_physics: bool = True
     use_energy_residual: bool = False
 
@@ -129,6 +146,7 @@ class EvalConfig(BaseModel):
     metrics_path: str = "outputs/eval/metrics.json"
     report_path: str = "outputs/eval/report.md"
     split_name: str = "test"
+    export_analysis: bool = True
 
 
 class ServeConfig(BaseModel):

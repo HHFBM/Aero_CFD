@@ -1,25 +1,31 @@
 """Geometry feature encoders.
 
-`branch_feature_mode` only governs parameterized geometry paths that call these
-helpers directly. Some dataset converters, such as the raw AirfRANS path, store
-their own branch encoding and bypass this helper by design.
+Legacy fixed-dimension branch feature construction is centralized here via the
+shared GeometryFeatureBuilder compatibility layer.
 """
 
 from typing import Optional
 import numpy as np
 
 from .base import AirfoilParameterization
-from .preprocess import canonicalize_closed_contour
+from .branch_adapter import GeometryFeatureBuilder, sample_surface_signature, sample_surface_signature_from_points
 
 
-def sample_surface_signature(airfoil: AirfoilParameterization, num_points: int = 32) -> np.ndarray:
-    points = airfoil.surface_points(num_points)
-    return points.reshape(-1).astype(np.float32)
-
-
-def sample_surface_signature_from_points(surface_points: np.ndarray, num_points: int = 32) -> np.ndarray:
-    points = canonicalize_closed_contour(surface_points, num_points=num_points)
-    return points.reshape(-1).astype(np.float32)
+def build_branch_features_from_surface_points(
+    surface_points: np.ndarray,
+    mach: float,
+    aoa_deg: float,
+    reynolds: Optional[float] = None,
+    mode: str = "params",
+    signature_points: int = 32,
+) -> np.ndarray:
+    builder = GeometryFeatureBuilder(branch_feature_mode=mode, signature_points=signature_points)
+    return builder.build_from_surface_points(
+        surface_points,
+        mach=mach,
+        aoa_deg=aoa_deg,
+        reynolds=reynolds,
+    )
 
 
 def build_branch_features(
@@ -29,14 +35,10 @@ def build_branch_features(
     reynolds: Optional[float] = None,
     mode: str = "params",
 ) -> np.ndarray:
-    base = airfoil.parameter_vector()
-    flow = [mach, aoa_deg]
-    if reynolds is not None:
-        flow.append(reynolds)
-    feature = np.concatenate([base, np.asarray(flow, dtype=np.float32)], axis=0)
-    if mode == "params":
-        return feature.astype(np.float32)
-    if mode == "points":
-        signature = sample_surface_signature(airfoil)
-        return np.concatenate([feature, signature], axis=0).astype(np.float32)
-    raise ValueError(f"Unsupported branch feature mode: {mode}")
+    builder = GeometryFeatureBuilder(branch_feature_mode=mode)
+    return builder.build_from_airfoil(
+        airfoil,
+        mach=mach,
+        aoa_deg=aoa_deg,
+        reynolds=reynolds,
+    )

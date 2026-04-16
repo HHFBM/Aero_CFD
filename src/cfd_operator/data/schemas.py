@@ -33,6 +33,8 @@ class CFDSample:
     geometry_reconstructability: str = "unknown"
     geometry_params_semantics: str = "unknown"
     legacy_param_source: str = "none"
+    branch_input_mode: str = "legacy_fixed_features"
+    branch_input_source: str = "legacy_fixed_features"
     geometry_points: np.ndarray | None = None
     geometry_encoding_meta: str | None = None
     surface_sampling_info: str | None = None
@@ -66,6 +68,8 @@ class CFDSample:
             "geometry_reconstructability": self.geometry_reconstructability,
             "geometry_params_semantics": self.geometry_params_semantics,
             "legacy_param_source": self.legacy_param_source,
+            "branch_input_mode": self.branch_input_mode,
+            "branch_input_source": self.branch_input_source,
             "geometry_points": (
                 self.geometry_points.astype(np.float32)
                 if self.geometry_points is not None

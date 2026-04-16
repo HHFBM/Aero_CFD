@@ -83,6 +83,7 @@ def test_analysis_infer_bundle_exports(tmp_path: Path) -> None:
     assert (export_dir / "slice_values.csv").exists()
     assert (export_dir / "feature_summary.json").exists()
     assert (export_dir / "task_semantics.json").exists()
+    assert (export_dir / "dataset_capability.json").exists()
     assert (export_dir / "high_gradient_regions.png").exists()
 
     exported_predictions = json.loads((export_dir / "predictions.json").read_text(encoding="utf-8"))

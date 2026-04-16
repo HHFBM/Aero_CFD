@@ -1,13 +1,15 @@
 # CFD Operator Surrogate
 
-面向飞行器 CFD 加速分析的神经算子代理工程。当前仓库已经从“基础数值输出”推进到“分析型输出增强阶段（AirfRANS 适配版）”，并保持现有训练主线不被推翻：
+面向飞行器 CFD 加速分析的神经算子代理工程。当前仓库已经从“AirfRANS 适配的分析型输出工程”进一步整理为一个**以 AirfRANS 为默认数据适配器的通用 CFD surrogate 框架雏形**，并保持现有训练主线不被推翻：
 
 - 不删除现有接口
 - 不重写训练主线
 - 继续基于 2D / 简化翼型代理主线
 - 严格按 AirfRANS 实际可提供的数据设计监督与输出
+- 保持 AirfRANS 作为当前默认训练/测试数据源
+- 通过统一 schema / adapter / capability 降低对单一数据集的绑定
 
-当前工程支持两条主要路线：
+当前工程支持两条主要模型路线：
 
 - `DeepONet` 主线
 - `Geo-FNO` 对比基线
@@ -21,9 +23,29 @@
 - 可视化
 - Colab notebook 运行入口
 
+同时，当前工程结构上已经新增：
+
+- 统一 `CFDSurrogateSample` schema
+- `Synthetic / AirfRANS / AirfRANSOriginal / NPZFile` adapter
+- `DatasetCapability` / `TaskRequest`
+- decoder heads 抽象
+- capability-aware evaluator / infer / export 兼容层
+
 ## 1. 项目定位
 
 这个项目不是工业级三维 CFD 求解器替代品，而是一个“可训练、可评测、可解释、可导出”的 2D 气动代理系统。
+
+当前更准确的定位是：
+
+- **默认数据源**：AirfRANS 2D 不可压缩 RANS 数据
+- **默认任务**：field + scalar + surface + slice + feature 分析输出
+- **当前工程目标**：在不推翻 AirfRANS 主链路的前提下，形成一个可以继续接入其他 2D CFD 数据的通用 surrogate 框架骨架
+
+也就是说：
+
+- 现在依然是 AirfRANS 主线工程
+- 但 trainer / evaluator / infer / export 已经不再把 AirfRANS 当作唯一隐式前提
+- 后续新增数据源时，优先新增 adapter，而不是重写训练主框架
 
 适用场景：
 
@@ -42,6 +64,27 @@
 
 ## 2. 当前已经实现的能力
 
+### 2.0 框架抽象
+
+当前仓库已经具备以下通用化抽象，但默认行为仍兼容现有 AirfRANS 主路径：
+
+- 统一样本 schema
+  - [src/cfd_operator/schema.py](/Users/jason/Documents/CFD/src/cfd_operator/schema.py)
+- 数据 adapter
+  - [src/cfd_operator/data/adapters.py](/Users/jason/Documents/CFD/src/cfd_operator/data/adapters.py)
+- dataset capability / task request
+  - [src/cfd_operator/tasks/capabilities.py](/Users/jason/Documents/CFD/src/cfd_operator/tasks/capabilities.py)
+- decoder heads
+  - [src/cfd_operator/models/heads.py](/Users/jason/Documents/CFD/src/cfd_operator/models/heads.py)
+- metric registry
+  - [src/cfd_operator/evaluators/registry.py](/Users/jason/Documents/CFD/src/cfd_operator/evaluators/registry.py)
+
+这些抽象的作用是：
+
+- 让 AirfRANS 成为“默认 adapter”，而不是整套工程的隐式硬编码前提
+- 让 trainer / evaluator / infer 优先依赖 schema + capability
+- 在保持旧 payload / 旧 checkpoint 兼容的前提下，为后续接入其他 2D CFD 数据源做准备
+
 ### 2.1 数据
 
 支持以下数据路径：
@@ -51,7 +94,25 @@
 - `airfrans_original` 原始 AirfRANS 离线转换数据
 - `file` 类型 `.npz` 数据集
 
-当前主训练数据路径是 AirfRANS heavy 数据的统一 `.npz` 格式。
+当前默认主训练/测试数据路径仍然是 AirfRANS heavy 数据的统一 `.npz` 格式。
+
+同时当前 loader 侧已经改成 adapter 风格，支持：
+
+- `SyntheticAdapter`
+- `AirfRANSAdapter`
+- `AirfRANSOriginalAdapter`
+- `NPZFileAdapter`
+
+当前默认行为是：
+
+- 旧配置不改时，仍然走 AirfRANS 主路径
+- datamodule 会先通过 adapter 生成统一 schema
+- 然后桥接回当前 trainer/evaluator 仍在使用的 legacy payload
+
+这意味着：
+
+- 当前 AirfRANS 主链路不回退
+- 新增 2D CFD 数据源时，主要新增 adapter 即可
 
 ### 2.2 模型
 
@@ -131,9 +192,11 @@
 
 最近一次全量测试结果：
 
-- `21 passed`
+- `38 passed`
 
 ## 3. AirfRANS 适配原则
+
+AirfRANS 当前仍然是默认数据适配器，而不是被移除或降级掉的数据路径。
 
 当前实现严格遵守 AirfRANS 的真实边界：
 
@@ -219,6 +282,26 @@ line slice 表示沿指定二维直线抽取的局部剖面，当前支持：
 
 ## 5. 模型原理
 
+### 5.0 输出组织方式
+
+当前没有推翻 `DeepONet` 或 `Geo-FNO` 主干，而是新增了 decoder head 抽象：
+
+- `FieldDecoderHead`
+- `SurfaceDecoderHead`
+- `ScalarDecoderHead`
+- `FeatureDecoderHead`
+
+这层抽象的目的是：
+
+- 统一不同模型的输出组织方式
+- 减少“每个模型都自己手拼 fields/scalars/features”的耦合
+- 为后续新增模型或输出任务提供稳定接口
+
+注意：
+
+- 当前 `SurfaceDecoderHead` 仍主要表示“在 surface query points 上解码场量”的组织抽象
+- 它不是一条完全独立的表面专用网络主干
+
 ### 5.1 DeepONet
 
 当前 `DeepONet` 主线是典型 branch-trunk 结构：
@@ -296,11 +379,13 @@ src/cfd_operator/
   config/
   data/
   evaluators/
+  geometry/
   inference/
   losses/
   models/
   physics/
   postprocess/
+  tasks/
   trainers/
   visualization/
 scripts/
@@ -318,6 +403,10 @@ outputs/
 - [scripts/infer.py](/Users/jason/Documents/CFD/scripts/infer.py)
 - [src/cfd_operator/models/deeponet.py](/Users/jason/Documents/CFD/src/cfd_operator/models/deeponet.py)
 - [src/cfd_operator/models/fno.py](/Users/jason/Documents/CFD/src/cfd_operator/models/fno.py)
+- [src/cfd_operator/models/heads.py](/Users/jason/Documents/CFD/src/cfd_operator/models/heads.py)
+- [src/cfd_operator/schema.py](/Users/jason/Documents/CFD/src/cfd_operator/schema.py)
+- [src/cfd_operator/data/adapters.py](/Users/jason/Documents/CFD/src/cfd_operator/data/adapters.py)
+- [src/cfd_operator/tasks/capabilities.py](/Users/jason/Documents/CFD/src/cfd_operator/tasks/capabilities.py)
 - [src/cfd_operator/postprocess/analysis.py](/Users/jason/Documents/CFD/src/cfd_operator/postprocess/analysis.py)
 
 ## 8. 安装
@@ -338,6 +427,18 @@ pip install ".[data]"
 ```
 
 ## 9. 数据准备
+
+### 9.0 当前数据流
+
+当前统一的数据流可以概括为：
+
+`raw dataset / npz / tabular file -> adapter -> unified CFDSurrogateSample -> legacy payload bridge -> trainer/evaluator`
+
+这样做的意义是：
+
+- 保留 AirfRANS 当前主训练链路
+- 不要求用户重导已有 `.npz`
+- 让未来接入新数据源时主要修改 adapter，而不是重写 trainer/evaluator
 
 ### 9.1 生成 toy 数据
 
@@ -367,6 +468,22 @@ python scripts/prepare_dataset.py \
 - train：`700`
 - val：`150`
 - test：`150`
+
+### 9.4 Generic file dataset 示例
+
+如果你想接入非 AirfRANS 的 2D CFD 样本，当前推荐先走 `dataset_type=file` 路径。
+
+示例文件与说明：
+
+- [examples/generic_file_dataset_example.csv](/Users/jason/Documents/CFD/examples/generic_file_dataset_example.csv)
+- [examples/generic_file_dataset_example.md](/Users/jason/Documents/CFD/examples/generic_file_dataset_example.md)
+
+当前支持两类方式：
+
+- 直接提供预计算 `branch_*` 列
+- 提供 `geometry_points` / `geometry_x, geometry_y`，由 dataloader 根据 `branch_feature_mode` 自动派生 `branch_inputs`
+
+这部分已经能用于 generic 2D geometry 的训练数据适配，但仍然保持与现有固定维度 `branch_inputs` 主线兼容。
 
 ## 10. 训练
 
@@ -435,6 +552,19 @@ python scripts/evaluate.py \
 
 ## 12. 推理与 analysis bundle
 
+当前推理与导出不再隐式要求“数据一定来自 AirfRANS”，而是基于：
+
+- geometry semantics
+- output semantics
+- dataset capability
+
+来决定：
+
+- 哪些输出可以预测
+- 哪些指标可以评测
+- 哪些文件可以导出
+- 哪些项应优雅跳过
+
 示例输入：
 
 - [examples/inference_input.json](/Users/jason/Documents/CFD/examples/inference_input.json)
@@ -453,6 +583,8 @@ analysis bundle 目前会导出：
 
 - `predictions.json`
 - `scalar_summary.json`
+- `task_semantics.json`
+- `dataset_capability.json`
 - `surface_values.csv`
 - `slice_values.csv`
 - `feature_summary.json`
@@ -575,6 +707,10 @@ pytest -q
 
 当前测试覆盖：
 
+- unified schema
+- adapters
+- capabilities
+- decoder heads
 - geometry
 - data
 - losses
@@ -592,6 +728,8 @@ pytest -q
 ## 18. 当前局限
 
 - 当前仍是 2D 翼型主线，不是 3D 系统
+- unified schema 已经落地，但 trainer/evaluator 当前仍通过 legacy payload bridge 工作，不是唯一内部表示
+- 当前通用化的重点是“数据接入层与任务接口层解耦”，不是 branch encoder 全面重写
 - `heat_flux_surface` 和 `wall_shear_surface` 仍是近似代理
 - shock 相关量仍是高梯度近似，不是真实监督
 - physics loss 仍是 proxy 级约束，不是求解器离散格式
@@ -600,6 +738,8 @@ pytest -q
 
 ## 19. 下一步改进方向
 
+- 继续减少 unified schema 与 legacy payload 的双轨成本，逐步让更多内部流程直接读 schema
+- 为新 2D CFD 数据源补 adapter，而不是继续把逻辑写进 trainer/evaluator
 - 强化 `Geo-FNO` 的 scalar head，进一步压低 `cl/cd` 误差
 - 在 GPU 上重跑带 physics loss 的 Geo-FNO 对比
 - 继续统一 `pressure` 与 `cp_like` 的量纲处理

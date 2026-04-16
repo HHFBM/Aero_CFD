@@ -22,6 +22,8 @@ def export_analysis_bundle(output_dir: str | Path, payload: Dict[str, Any]) -> P
         save_json(bundle_dir / "scalar_summary.json", _jsonify(payload["predicted_scalars"]))
     if "metadata" in payload and "task_semantics" in payload["metadata"]:
         save_json(bundle_dir / "task_semantics.json", _jsonify(payload["metadata"]["task_semantics"]))
+    if "metadata" in payload and payload["metadata"].get("dataset_capability") is not None:
+        save_json(bundle_dir / "dataset_capability.json", _jsonify(payload["metadata"]["dataset_capability"]))
 
     if "surface_predictions" in payload:
         surface = payload["surface_predictions"]

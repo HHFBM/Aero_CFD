@@ -32,6 +32,11 @@ class BaseOperatorModel(nn.Module, ABC):
         )
         return self.forward(branch_inputs=branch_inputs, query_points=dummy_points)["scalars"]
 
-    def model_metadata(self) -> dict[str, Any]:
-        return {"class_name": self.__class__.__name__}
+    def decoder_head_metadata(self) -> dict[str, dict[str, object]]:
+        return {}
 
+    def model_metadata(self) -> dict[str, Any]:
+        return {
+            "class_name": self.__class__.__name__,
+            "decoder_heads": self.decoder_head_metadata(),
+        }

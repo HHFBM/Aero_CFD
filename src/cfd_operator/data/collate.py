@@ -30,6 +30,8 @@ def cfd_collate_fn(batch: list[dict[str, Any]]) -> dict[str, Any]:
         "geometry_reconstructability": [item["geometry_reconstructability"] for item in batch],
         "geometry_params_semantics": [item["geometry_params_semantics"] for item in batch],
         "legacy_param_source": [item["legacy_param_source"] for item in batch],
+        "branch_input_mode": [item["branch_input_mode"] for item in batch],
+        "branch_input_source": [item["branch_input_source"] for item in batch],
         "geometry_encoding_meta": [item["geometry_encoding_meta"] for item in batch],
         "surface_sampling_info": [item["surface_sampling_info"] for item in batch],
         "geometry_params": torch.stack([item["geometry_params"] for item in batch]),

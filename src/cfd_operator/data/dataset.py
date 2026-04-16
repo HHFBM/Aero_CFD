@@ -36,6 +36,20 @@ class CFDOperatorDataset(Dataset[dict[str, torch.Tensor]]):
             raise KeyError(format_missing_fields_message("CFDOperatorDataset payload", [key]))
         return np.asarray(self.payload[key][index], dtype=dtype)
 
+    def _payload_text(self, key: str, index: int, default: str) -> str:
+        values = self.payload.get(key)
+        if values is None:
+            return default
+        if isinstance(values, np.ndarray):
+            if values.ndim == 0 or values.shape[0] <= index:
+                return default
+            return str(values[index])
+        if isinstance(values, (list, tuple)):
+            if len(values) <= index:
+                return default
+            return str(values[index])
+        return str(values)
+
     def __len__(self) -> int:
         return int(self.indices.shape[0])
 
@@ -81,15 +95,17 @@ class CFDOperatorDataset(Dataset[dict[str, torch.Tensor]]):
 
         sample: dict[str, torch.Tensor | str] = {
             "airfoil_id": str(self.payload["airfoil_id"][index]),
-            "geometry_mode": str(self.payload.get("geometry_mode", ["unknown"])[index]),
-            "geometry_source": str(self.payload.get("geometry_source", ["unknown"])[index]),
-            "geometry_representation": str(self.payload.get("geometry_representation", ["unknown"])[index]),
-            "branch_encoding_type": str(self.payload.get("branch_encoding_type", ["unknown"])[index]),
-            "geometry_reconstructability": str(self.payload.get("geometry_reconstructability", ["unknown"])[index]),
-            "geometry_params_semantics": str(self.payload.get("geometry_params_semantics", ["unknown"])[index]),
-            "legacy_param_source": str(self.payload.get("legacy_param_source", ["unknown"])[index]),
-            "geometry_encoding_meta": str(self.payload.get("geometry_encoding_meta", [""])[index]),
-            "surface_sampling_info": str(self.payload.get("surface_sampling_info", [""])[index]),
+            "geometry_mode": self._payload_text("geometry_mode", index, "unknown"),
+            "geometry_source": self._payload_text("geometry_source", index, "unknown"),
+            "geometry_representation": self._payload_text("geometry_representation", index, "unknown"),
+            "branch_encoding_type": self._payload_text("branch_encoding_type", index, "unknown"),
+            "geometry_reconstructability": self._payload_text("geometry_reconstructability", index, "unknown"),
+            "geometry_params_semantics": self._payload_text("geometry_params_semantics", index, "unknown"),
+            "legacy_param_source": self._payload_text("legacy_param_source", index, "unknown"),
+            "branch_input_mode": self._payload_text("branch_input_mode", index, "legacy_fixed_features"),
+            "branch_input_source": self._payload_text("branch_input_source", index, "legacy_fixed_features"),
+            "geometry_encoding_meta": self._payload_text("geometry_encoding_meta", index, ""),
+            "surface_sampling_info": self._payload_text("surface_sampling_info", index, ""),
             "geometry_params": torch.from_numpy(self._payload_array("geometry_params", index)),
             "flow_conditions": torch.from_numpy(self._payload_array("flow_conditions", index)),
             "branch_inputs_raw": torch.from_numpy(branch_inputs),

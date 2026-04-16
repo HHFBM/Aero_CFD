@@ -10,16 +10,16 @@ import numpy as np
 from torch.utils.data import DataLoader
 
 from cfd_operator.config.schemas import DataConfig
+from cfd_operator.data.adapters import AdapterResult, build_adapter
 from cfd_operator.data.collate import cfd_collate_fn
-from cfd_operator.data.analysis import ensure_analysis_payload
 from cfd_operator.data.dataset import CFDOperatorDataset
-from cfd_operator.data.file_dataset import load_dataset_payload
 from cfd_operator.data.normalization import StandardNormalizer
 from cfd_operator.data.airfrans import AirfRANSDatasetConverter
 from cfd_operator.data.airfrans_original import AirfRANSOriginalDatasetConverter
 from cfd_operator.data.quality import validate_dataset_payload
 from cfd_operator.data.synthetic import SyntheticAirfoilDatasetGenerator
-from cfd_operator.geometry.semantics import ensure_geometry_payload_metadata
+from cfd_operator.schema import CFDSurrogateSample
+from cfd_operator.tasks.capabilities import DatasetCapability
 from cfd_operator.utils.io import ensure_dir
 
 
@@ -55,6 +55,9 @@ class CFDDataModule:
         self.config = config
         self.batch_size = batch_size
         self.payload: dict[str, Any] | None = None
+        self.adapter_result: AdapterResult | None = None
+        self.unified_samples: list[CFDSurrogateSample] = []
+        self.dataset_capability: DatasetCapability | None = None
         self.normalizers: NormalizerBundle | None = None
         self.datasets: dict[str, CFDOperatorDataset] = {}
 
@@ -78,12 +81,11 @@ class CFDDataModule:
 
     def setup(self) -> None:
         dataset_path = self.prepare_data()
-        self.payload = load_dataset_payload(dataset_path)
-        self.payload = ensure_geometry_payload_metadata(
-            self.payload,
-            branch_feature_mode=self.config.branch_feature_mode,
-        )
-        self.payload = ensure_analysis_payload(self.payload)
+        adapter = build_adapter(self.config)
+        self.adapter_result = adapter.load(dataset_path)
+        self.payload = self.adapter_result.payload
+        self.unified_samples = self.adapter_result.samples
+        self.dataset_capability = self.adapter_result.capability
         if self.config.strict_quality_checks:
             try:
                 validate_dataset_payload(self.payload, strict=True)
@@ -92,7 +94,10 @@ class CFDDataModule:
                     raise
                 generator = SyntheticAirfoilDatasetGenerator(config=self.config)
                 generator.save(dataset_path)
-                self.payload = load_dataset_payload(dataset_path)
+                self.adapter_result = adapter.load(dataset_path)
+                self.payload = self.adapter_result.payload
+                self.unified_samples = self.adapter_result.samples
+                self.dataset_capability = self.adapter_result.capability
                 validate_dataset_payload(self.payload, strict=True)
 
         train_indices = self.payload.get("train_indices")

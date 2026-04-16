@@ -61,6 +61,8 @@ GEOMETRY_METADATA_KEYS = {
     "geometry_reconstructability",
     "geometry_params_semantics",
     "legacy_param_source",
+    "branch_input_mode",
+    "branch_input_source",
     "geometry_points",
     "geometry_encoding_meta",
     "surface_sampling_info",
@@ -163,6 +165,7 @@ def validate_dataset_payload(payload: Dict[str, Any], strict: bool = True) -> No
     geometry_mode = np.asarray(payload["geometry_mode"]).astype(str)
     geometry_representation = np.asarray(payload["geometry_representation"]).astype(str)
     branch_encoding_type = np.asarray(payload["branch_encoding_type"]).astype(str)
+    branch_input_mode = np.asarray(payload.get("branch_input_mode", np.asarray(["legacy_fixed_features"] * num_samples))).astype(str)
     geometry_reconstructability = np.asarray(payload["geometry_reconstructability"]).astype(str)
     geometry_params = np.asarray(payload["geometry_params"])
     branch_inputs = np.asarray(payload["branch_inputs"])
@@ -177,11 +180,15 @@ def validate_dataset_payload(payload: Dict[str, Any], strict: bool = True) -> No
         branch_dim = int(branch_inputs[index].shape[-1])
         flow_dim = int(flow_conditions[index].shape[-1])
         point_count = int(geometry_points[index].shape[0])
+        input_mode = branch_input_mode[index]
 
         if mode == "legacy_naca_params" and geom_dim < 4:
             raise ValueError("legacy_naca_params samples must store at least 4 geometry_params entries.")
         if representation == "geometry_summary" and reconstructability == "safe_from_geometry_params":
             raise ValueError("geometry_summary payloads cannot claim safe reconstruction from geometry_params.")
+        if input_mode == "encoded_geometry":
+            _ensure(branch_dim > flow_dim, "encoded_geometry branch_inputs must retain a non-empty geometry component.")
+            continue
         if encoding == "normalized_surface_signature_plus_flow":
             expected_signature_dim = point_count * 2 + min(flow_dim, 2)
             _ensure(
@@ -190,6 +197,17 @@ def validate_dataset_payload(payload: Dict[str, Any], strict: bool = True) -> No
                     "normalized_surface_signature_plus_flow expects branch_inputs to match "
                     "geometry_points_signature + [mach, aoa]."
                 ),
+            )
+        if encoding == "derived_surface_signature_plus_flow":
+            expected_signature_dim = point_count * 2 + flow_dim
+            _ensure(
+                branch_dim == expected_signature_dim,
+                "derived_surface_signature_plus_flow expects branch_inputs to match canonical geometry_points signature + flow.",
+            )
+        if encoding == "derived_geometry_summary_plus_flow":
+            _ensure(
+                branch_dim == geom_dim + flow_dim,
+                "derived_geometry_summary_plus_flow expects branch_inputs to match geometry summary + flow.",
             )
         if encoding.startswith("naca_parameter_vector_plus_flow") and branch_dim < geom_dim + 2:
             raise ValueError("Parameter-vector branch encodings must contain geometry_params plus flow conditions.")

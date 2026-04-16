@@ -9,10 +9,12 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from cfd_operator.config.schemas import DataConfig
+from cfd_operator.geometry import BranchInputAdapter
 from cfd_operator.output_semantics import format_missing_fields_message
 
 
-def load_dataset_payload(path: str | Path) -> dict[str, Any]:
+def load_dataset_payload(path: str | Path, config: DataConfig | None = None) -> dict[str, Any]:
     input_path = Path(path)
     suffix = input_path.suffix.lower()
 
@@ -28,11 +30,11 @@ def load_dataset_payload(path: str | Path) -> dict[str, Any]:
 
     if suffix == ".parquet":
         table = pd.read_parquet(input_path)
-        return _group_tabular_records(table)
+        return _group_tabular_records(table, config=config)
 
     if suffix == ".csv":
         table = pd.read_csv(input_path)
-        return _group_tabular_records(table)
+        return _group_tabular_records(table, config=config)
 
     raise ValueError(f"Unsupported dataset format: {suffix}")
 
@@ -46,6 +48,45 @@ def _optional_distinct_points(frame: pd.DataFrame, x_col: str, y_col: str) -> np
     return points
 
 
+def _estimate_surface_normals(surface_points: np.ndarray) -> np.ndarray:
+    if surface_points.shape[0] == 0:
+        return np.zeros((0, 2), dtype=np.float32)
+    prev_points = np.roll(surface_points, 1, axis=0)
+    next_points = np.roll(surface_points, -1, axis=0)
+    tangent = next_points - prev_points
+    normals = np.stack([-tangent[:, 1], tangent[:, 0]], axis=1)
+    norm = np.linalg.norm(normals, axis=1, keepdims=True)
+    norm = np.maximum(norm, 1.0e-6)
+    normals = normals / norm
+    centroid = surface_points.mean(axis=0, keepdims=True)
+    direction = surface_points - centroid
+    flip_mask = (normals * direction).sum(axis=1, keepdims=True) < 0.0
+    normals = np.where(flip_mask, -normals, normals)
+    return normals.astype(np.float32)
+
+
+def _build_farfield_mask(points: np.ndarray) -> np.ndarray:
+    if points.shape[0] == 0:
+        return np.zeros((0,), dtype=np.float32)
+    x = points[:, 0]
+    y = points[:, 1]
+    x_min, x_max = float(x.min()), float(x.max())
+    y_min, y_max = float(y.min()), float(y.max())
+    x_pad = 0.08 * max(x_max - x_min, 1.0e-6)
+    y_pad = 0.08 * max(y_max - y_min, 1.0e-6)
+    mask = (
+        (x <= x_min + x_pad)
+        | (x >= x_max - x_pad)
+        | (y <= y_min + y_pad)
+        | (y >= y_max - y_pad)
+    )
+    if not np.any(mask):
+        centroid = points.mean(axis=0, keepdims=True)
+        scores = np.linalg.norm(points - centroid, axis=1)
+        mask[np.argmax(scores)] = True
+    return mask.astype(np.float32)
+
+
 def _parse_geometry_params(frame: pd.DataFrame) -> np.ndarray:
     parameter_columns = sorted(column for column in frame.columns if column.startswith("geom_param_"))
     if parameter_columns:
@@ -57,10 +98,14 @@ def _parse_geometry_params(frame: pd.DataFrame) -> np.ndarray:
     return np.zeros((4,), dtype=np.float32)
 
 
-def _infer_geometry_payload(frame: pd.DataFrame) -> tuple[np.ndarray, np.ndarray, np.ndarray, str, str, str, str, str]:
+def _infer_geometry_payload(
+    frame: pd.DataFrame,
+    config: DataConfig | None,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, str, str, str, str, str]:
     geometry_mode = str(frame["geometry_mode"].iloc[0]) if "geometry_mode" in frame.columns else ""
     branch_columns = sorted(column for column in frame.columns if column.startswith("branch_"))
     has_legacy_params = {"max_camber", "camber_position", "thickness", "chord"}.issubset(frame.columns)
+    branch_encoding_type = "precomputed_branch_columns"
     geometry_points = _optional_distinct_points(frame, "geometry_x", "geometry_y")
     if geometry_points is None and "surface_flag" in frame.columns:
         geometry_points = frame.loc[frame["surface_flag"] == 1, ["x", "y"]].to_numpy(dtype=np.float32)
@@ -68,13 +113,50 @@ def _infer_geometry_payload(frame: pd.DataFrame) -> tuple[np.ndarray, np.ndarray
     if branch_columns:
         branch_inputs = frame[branch_columns].iloc[0].to_numpy(dtype=np.float32)
     elif has_legacy_params:
-        branch_inputs = frame[
-            ["max_camber", "camber_position", "thickness", "chord", "mach", "aoa"]
-        ].iloc[0].to_numpy(dtype=np.float32)
+        geometry_params = frame[["max_camber", "camber_position", "thickness", "chord"]].iloc[0].to_numpy(dtype=np.float32)
+        if config is not None:
+            adapter = BranchInputAdapter(
+                branch_input_mode=config.branch_input_mode,
+                branch_feature_mode=config.branch_feature_mode,
+                signature_points=config.num_surface_points,
+                encoded_geometry_latent_dim=config.encoded_geometry_latent_dim,
+            )
+            branch_inputs = adapter.build_from_geometry_params(
+                geometry_params,
+                mach=float(frame["mach"].iloc[0]),
+                aoa_deg=float(frame["aoa"].iloc[0]),
+                reynolds=float(frame["reynolds"].iloc[0]) if config.include_reynolds and "reynolds" in frame.columns else None,
+                surface_points=geometry_points,
+            )
+        else:
+            branch_inputs = frame[
+                ["max_camber", "camber_position", "thickness", "chord", "mach", "aoa"]
+            ].iloc[0].to_numpy(dtype=np.float32)
+    elif geometry_points is not None and geometry_points.shape[0] >= 4 and config is not None:
+        adapter = BranchInputAdapter(
+            branch_input_mode=config.branch_input_mode,
+            branch_feature_mode=config.branch_feature_mode,
+            signature_points=config.num_surface_points,
+            encoded_geometry_latent_dim=config.encoded_geometry_latent_dim,
+        )
+        branch_inputs = adapter.build_from_surface_points(
+            geometry_points,
+            mach=float(frame["mach"].iloc[0]),
+            aoa_deg=float(frame["aoa"].iloc[0]),
+            reynolds=float(frame["reynolds"].iloc[0]) if config.include_reynolds and "reynolds" in frame.columns else None,
+        )
+        if config.branch_input_mode == "encoded_geometry":
+            branch_encoding_type = "encoded_geometry_compatible_features"
+        else:
+            branch_encoding_type = (
+                "derived_geometry_summary_plus_flow"
+                if config.branch_feature_mode == "params"
+                else "derived_surface_signature_plus_flow"
+            )
     else:
         raise ValueError(
-            "Generic tabular file datasets without legacy geometry_params must provide precomputed branch_* columns. "
-            "This loader preserves checkpoint compatibility and does not guess a new branch encoding schema."
+            "Generic tabular file datasets without legacy geometry_params require either precomputed branch_* columns, "
+            "or a DataConfig-driven geometry encoder path with usable geometry points."
         )
 
     if has_legacy_params:
@@ -82,14 +164,17 @@ def _infer_geometry_payload(frame: pd.DataFrame) -> tuple[np.ndarray, np.ndarray
         default_mode = "legacy_naca_params"
         representation = "parameterized_geometry"
         params_semantics = "naca4_parameter_vector"
-        branch_encoding_type = "naca_parameter_vector_plus_flow"
+        branch_encoding_type = (
+            "encoded_geometry_compatible_features"
+            if config is not None and config.branch_input_mode == "encoded_geometry"
+            else "naca_parameter_vector_plus_flow"
+        )
         reconstructability = "safe_from_geometry_params"
     else:
         geometry_params = _parse_geometry_params(frame)
         default_mode = "generic_surface_points"
         representation = "sampled_surface_signature"
         params_semantics = "generic_geometry_metadata_only"
-        branch_encoding_type = "precomputed_branch_columns"
         reconstructability = "surface_points_only"
 
     return (
@@ -104,7 +189,7 @@ def _infer_geometry_payload(frame: pd.DataFrame) -> tuple[np.ndarray, np.ndarray
     )
 
 
-def _group_tabular_records(table: pd.DataFrame) -> dict[str, Any]:
+def _group_tabular_records(table: pd.DataFrame, config: DataConfig | None = None) -> dict[str, Any]:
     if "sample_id" not in table.columns:
         raise ValueError("CSV/Parquet datasets require a 'sample_id' column.")
     required_columns = {
@@ -140,16 +225,19 @@ def _group_tabular_records(table: pd.DataFrame) -> dict[str, Any]:
 
     samples = []
     for sample_id, frame in grouped:
+        has_precomputed_branch = any(column.startswith("branch_") for column in frame.columns)
         if field_name_candidates[3] == "aux":
             auxiliary_values = np.zeros((frame.shape[0],), dtype=np.float32)
         else:
             auxiliary_values = frame[field_name_candidates[3]].to_numpy(dtype=np.float32)
 
-        geometry_params, branch_inputs, geometry_points, geometry_mode, geometry_representation, geometry_params_semantics, branch_encoding_type, geometry_reconstructability = _infer_geometry_payload(frame)
+        geometry_params, branch_inputs, geometry_points, geometry_mode, geometry_representation, geometry_params_semantics, branch_encoding_type, geometry_reconstructability = _infer_geometry_payload(frame, config=config)
         surface_points = frame.loc[frame["surface_flag"] == 1, ["x", "y"]].to_numpy(dtype=np.float32)
         surface_count = surface_points.shape[0]
+        surface_normals = _estimate_surface_normals(surface_points)
         query_points = frame[["x", "y"]].to_numpy(dtype=np.float32)
         query_count = query_points.shape[0]
+        farfield_mask = _build_farfield_mask(query_points)
         samples.append(
             {
                 "airfoil_id": str(sample_id),
@@ -157,10 +245,26 @@ def _group_tabular_records(table: pd.DataFrame) -> dict[str, Any]:
                 "geometry_mode": geometry_mode,
                 "geometry_source": str(frame["source"].iloc[0]),
                 "geometry_representation": geometry_representation,
-                "branch_encoding_type": branch_encoding_type,
+                "branch_encoding_type": (
+                    f"geometry_preprocessed_{config.branch_feature_mode}"
+                    if branch_encoding_type == "precomputed_branch_columns" and config is not None and not any(column.startswith("branch_") for column in frame.columns)
+                    else branch_encoding_type
+                ),
                 "geometry_reconstructability": geometry_reconstructability,
                 "geometry_params_semantics": geometry_params_semantics,
                 "legacy_param_source": "tabular_file",
+                "branch_input_mode": (
+                    config.branch_input_mode if config is not None else "legacy_fixed_features"
+                ),
+                "branch_input_source": (
+                    "precomputed_branch_columns"
+                    if has_precomputed_branch
+                    else (
+                        "encoded_geometry"
+                    if config is not None and config.branch_input_mode == "encoded_geometry"
+                    else "legacy_fixed_features"
+                    )
+                ),
                 "geometry_points": geometry_points if geometry_points.size > 0 else surface_points,
                 "geometry_encoding_meta": "",
                 "surface_sampling_info": "",
@@ -176,10 +280,10 @@ def _group_tabular_records(table: pd.DataFrame) -> dict[str, Any]:
                     ],
                     axis=1,
                 ),
-                "farfield_mask": np.zeros((query_count,), dtype=np.float32),
+                "farfield_mask": farfield_mask,
                 "farfield_targets": np.zeros((4,), dtype=np.float32),
                 "surface_points": surface_points,
-                "surface_normals": np.zeros((surface_count, 2), dtype=np.float32),
+                "surface_normals": surface_normals,
                 "surface_arc_length": np.zeros((surface_count, 1), dtype=np.float32),
                 "cp_reference": np.asarray([0.0, 1.0], dtype=np.float32),
                 "surface_cp": frame.loc[frame["surface_flag"] == 1, ["cp"]].to_numpy(dtype=np.float32),

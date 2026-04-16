@@ -12,6 +12,7 @@ from cfd_operator.config.schemas import LossConfig
 from cfd_operator.data.module import NormalizerBundle
 from cfd_operator.models.base import BaseOperatorModel
 from cfd_operator.physics import compressible_euler_residuals, incompressible_rans_proxy_residuals
+from cfd_operator.tasks.capabilities import DatasetCapability, EffectiveTaskSet, TaskRequest, resolve_effective_tasks
 
 
 def masked_reduce(loss: torch.Tensor, mask: Optional[torch.Tensor], reduction: str = "mean") -> torch.Tensor:
@@ -70,6 +71,22 @@ class CompositeLoss:
     normalizers: NormalizerBundle
     field_names: tuple[str, ...] = ("u", "v", "p", "rho")
     pressure_target_mode: str = "raw"
+    dataset_capability: DatasetCapability | None = None
+    task_request: TaskRequest | None = None
+
+    def set_task_context(
+        self,
+        *,
+        dataset_capability: DatasetCapability | None,
+        task_request: TaskRequest | None,
+    ) -> None:
+        self.dataset_capability = dataset_capability
+        self.task_request = task_request
+
+    def _effective_tasks(self) -> EffectiveTaskSet | None:
+        if self.dataset_capability is None or self.task_request is None:
+            return None
+        return resolve_effective_tasks(self.dataset_capability, self.task_request)
 
     def __call__(
         self,
@@ -77,26 +94,39 @@ class CompositeLoss:
         batch: dict[str, Any],
         outputs: dict[str, torch.Tensor],
     ) -> Tuple[torch.Tensor, Dict[str, float]]:
+        effective_tasks = self._effective_tasks()
         field_loss = regression_loss(
             outputs["fields"],
             batch["field_targets"],
             loss_type=self.config.field_loss_type,
             mask=batch["query_mask"],
         )
+        if effective_tasks is not None and not effective_tasks.field:
+            field_loss = batch["field_targets"].new_zeros(())
         scalar_loss = regression_loss(
             outputs["scalars"],
             batch["scalar_targets"],
             loss_type=self.config.scalar_loss_type,
             mask=None,
         )
-        surface_loss = self._surface_cp_loss(model=model, batch=batch)
-        surface_pressure_loss = self._surface_pressure_loss(model=model, batch=batch)
-        heat_flux_loss = self._surface_heat_flux_loss(model=model, batch=batch)
-        wall_shear_loss = self._surface_wall_shear_loss(model=model, batch=batch)
-        physics_loss = self._physics_loss(model=model, batch=batch) if self.config.use_physics else torch.zeros_like(field_loss)
-        boundary_loss = self._boundary_loss(model=model, batch=batch, outputs=outputs)
-        slice_loss = self._slice_loss(model=model, batch=batch)
-        feature_loss = self._feature_loss(batch=batch, outputs=outputs)
+        if effective_tasks is not None and not effective_tasks.scalar:
+            scalar_loss = batch["field_targets"].new_zeros(())
+        surface_loss = self._surface_cp_loss(model=model, batch=batch) if effective_tasks is None or effective_tasks.surface else batch["field_targets"].new_zeros(())
+        surface_pressure_loss = self._surface_pressure_loss(model=model, batch=batch) if effective_tasks is None or effective_tasks.surface else batch["field_targets"].new_zeros(())
+        heat_flux_loss = self._surface_heat_flux_loss(model=model, batch=batch) if effective_tasks is None or effective_tasks.surface else batch["field_targets"].new_zeros(())
+        wall_shear_loss = self._surface_wall_shear_loss(model=model, batch=batch) if effective_tasks is None or effective_tasks.surface else batch["field_targets"].new_zeros(())
+        physics_loss = (
+            self._physics_loss(model=model, batch=batch)
+            if self.config.use_physics and (effective_tasks is None or effective_tasks.consistency)
+            else torch.zeros_like(field_loss)
+        )
+        boundary_loss = (
+            self._boundary_loss(model=model, batch=batch, outputs=outputs)
+            if effective_tasks is None or effective_tasks.consistency
+            else batch["field_targets"].new_zeros(())
+        )
+        slice_loss = self._slice_loss(model=model, batch=batch) if effective_tasks is None or effective_tasks.slice else batch["field_targets"].new_zeros(())
+        feature_loss = self._feature_loss(batch=batch, outputs=outputs) if effective_tasks is None or effective_tasks.feature else batch["field_targets"].new_zeros(())
         shock_location_loss = self._shock_location_loss(batch=batch, outputs=outputs)
 
         total_loss = (

@@ -13,12 +13,11 @@ import torch
 from cfd_operator.config.schemas import ProjectConfig
 from cfd_operator.data.module import NormalizerBundle
 from cfd_operator.geometry import (
+    BranchInputAdapter,
     GeometryInputError,
     NACA4Airfoil,
-    build_branch_features,
     resolve_geometry_input,
 )
-from cfd_operator.geometry.features import sample_surface_signature_from_points
 from cfd_operator.geometry.preprocess import CanonicalGeometry2D, maybe_warn_geometry_adapter
 from cfd_operator.geometry.semantics import build_inference_geometry_semantics
 from cfd_operator.models import create_model
@@ -41,6 +40,7 @@ from cfd_operator.visualization import (
     plot_surface_cp,
     plot_surface_pressure,
 )
+from cfd_operator.tasks.capabilities import DatasetCapability
 
 
 @dataclass
@@ -48,6 +48,7 @@ class Predictor:
     config: ProjectConfig
     normalizers: NormalizerBundle
     model: torch.nn.Module
+    dataset_capability: DatasetCapability | None = None
     device: str = "cpu"
 
     @classmethod
@@ -59,7 +60,16 @@ class Predictor:
         model.load_state_dict(checkpoint["model_state"], strict=False)
         model.to(device)
         model.eval()
-        return cls(config=config, normalizers=normalizers, model=model, device=device)
+        dataset_capability = None
+        if checkpoint.get("dataset_capability") is not None:
+            dataset_capability = DatasetCapability.from_dict(checkpoint["dataset_capability"])
+        return cls(
+            config=config,
+            normalizers=normalizers,
+            model=model,
+            dataset_capability=dataset_capability,
+            device=device,
+        )
 
     def predict(
         self,
@@ -114,6 +124,7 @@ class Predictor:
                 "model_name": self.config.model.name,
                 "field_names": list(self.config.data.field_names),
                 "scalar_names": scalar_names[: len(predicted_scalars)],
+                "branch_input_mode": self.config.data.branch_input_mode,
                 "pressure_target_mode": self.config.data.pressure_target_mode,
                 "pressure_semantics": semantics["pressure"],
                 "task_semantics": semantics["tasks"],
@@ -128,6 +139,9 @@ class Predictor:
                     "slice_outputs": "predicted when slice definitions are supplied",
                     "feature_outputs": "predicted_or_derived when requested",
                 },
+                "dataset_capability": (
+                    self.dataset_capability.as_dict() if self.dataset_capability is not None else None
+                ),
             },
         }
         if flow_conditions.shape[0] > 2:
@@ -239,93 +253,68 @@ class Predictor:
         """
 
         expected_dim = int(self.normalizers.branch.mean.shape[0])
-        flow_dim = 3 if self.config.data.include_reynolds else 2
-        flow = [mach, aoa_deg]
-        if self.config.data.include_reynolds and reynolds is not None:
-            flow.append(reynolds)
-        flow_array = np.asarray(flow, dtype=np.float32)
-
-        if canonical_geometry.airfoil is not None:
-            default_branch = build_branch_features(
-                canonical_geometry.airfoil,
+        adapter = BranchInputAdapter(
+            branch_input_mode=self.config.data.branch_input_mode,
+            branch_feature_mode=self.config.data.branch_feature_mode,
+            signature_points=self.config.data.num_surface_points,
+            encoded_geometry_latent_dim=self.config.data.encoded_geometry_latent_dim,
+        )
+        try:
+            branch_inputs = adapter.build_for_checkpoint(
+                canonical_geometry,
                 mach=mach,
                 aoa_deg=aoa_deg,
-                reynolds=reynolds if self.config.data.include_reynolds else None,
-                mode=self.config.data.branch_feature_mode,
-            ).astype(np.float32)
-            if default_branch.shape[0] == expected_dim:
-                return default_branch, build_inference_geometry_semantics(
-                    geometry_mode=canonical_geometry.geometry_mode,
-                    geometry_representation="parameterized_geometry",
-                    branch_encoding_type="naca_parameter_vector_plus_flow",
-                    geometry_reconstructability=canonical_geometry.reconstructability,
-                    geometry_params_semantics=canonical_geometry.geometry_params_semantics,
-                    legacy_param_source="naca4_parameter_vector",
-                    notes="Runtime geometry was reconstructed from legacy NACA parameters.",
-                )
-
-        signature_dim = expected_dim - min(flow_array.shape[0], flow_dim)
-        if signature_dim > 0 and signature_dim % 2 == 0:
-            num_surface_points = signature_dim // 2
-            surface_signature = sample_surface_signature_from_points(
-                canonical_geometry.normalized_surface_points,
-                num_points=num_surface_points,
+                reynolds=reynolds,
+                expected_dim=expected_dim,
+                include_reynolds=self.config.data.include_reynolds,
             )
-            branch_inputs = np.concatenate([surface_signature, flow_array[:2]], axis=0).astype(np.float32)
-            if branch_inputs.shape[0] == expected_dim:
+        except ValueError as exc:
+            raise ValueError(
+                "Could not build branch_inputs for this checkpoint from the provided geometry input. "
+                "This usually means the checkpoint expects a legacy branch encoding that cannot be safely reconstructed "
+                "from the selected geometry_mode. Try legacy_naca_params for NACA-style checkpoints, or use a "
+                "surface-signature-compatible checkpoint for generic_surface_points inputs."
+            ) from exc
+
+        if self.config.data.branch_input_mode == "encoded_geometry":
+            if canonical_geometry.adapter_note:
                 maybe_warn_geometry_adapter(canonical_geometry.adapter_note)
-                return branch_inputs, build_inference_geometry_semantics(
-                    geometry_mode=canonical_geometry.geometry_mode,
-                    geometry_representation="sampled_surface_signature",
-                    branch_encoding_type="normalized_surface_signature_plus_flow",
-                    geometry_reconstructability=canonical_geometry.reconstructability,
-                    geometry_params_semantics=canonical_geometry.geometry_params_semantics,
-                    notes=(
-                        canonical_geometry.adapter_note
-                        or "Runtime geometry was encoded as a normalized sampled surface signature."
-                    ),
-                )
-
-        geometry_params = None if canonical_geometry.geometry_params is None else np.asarray(canonical_geometry.geometry_params, dtype=np.float32).reshape(-1)
-        if geometry_params is not None and geometry_params.shape[0] + flow_array.shape[0] == expected_dim:
-            if canonical_geometry.airfoil is None and canonical_geometry.geometry_mode == "generic_surface_points":
-                maybe_warn_geometry_adapter(
-                    canonical_geometry.adapter_note
-                    or "Generic surface points were reduced to a coarse parameter summary for this checkpoint."
-                )
-            return np.concatenate([geometry_params, flow_array], axis=0).astype(np.float32), build_inference_geometry_semantics(
+            return branch_inputs, build_inference_geometry_semantics(
                 geometry_mode=canonical_geometry.geometry_mode,
-                geometry_representation=(
-                    "parameterized_geometry" if canonical_geometry.airfoil is not None else "geometry_summary"
-                ),
-                branch_encoding_type="parameter_vector_plus_flow_adapter",
+                geometry_representation=canonical_geometry.geometry_params_semantics,
+                branch_encoding_type="encoded_geometry_compatible_features",
                 geometry_reconstructability=canonical_geometry.reconstructability,
                 geometry_params_semantics=canonical_geometry.geometry_params_semantics,
+                legacy_param_source="encoded_geometry_adapter",
                 notes=(
                     canonical_geometry.adapter_note
-                    or "Runtime geometry was passed through a parameter-vector compatible adapter."
+                    or "Runtime geometry was encoded through the lightweight GeometryEncoder and remapped to a fixed branch-compatible representation."
                 ),
             )
 
-        if geometry_params is not None and geometry_params.shape[0] + 2 == expected_dim:
+        representation = (
+            "parameterized_geometry"
+            if canonical_geometry.airfoil is not None
+            else (
+                "sampled_surface_signature"
+                if canonical_geometry.geometry_mode == "generic_surface_points"
+                else "geometry_summary"
+            )
+        )
+        notes = "Runtime geometry was reconstructed from legacy NACA parameters." if canonical_geometry.airfoil is not None else (
+            canonical_geometry.adapter_note
+            or "Runtime geometry was adapted through the legacy fixed-feature compatibility path."
+        )
+        if canonical_geometry.airfoil is None and canonical_geometry.adapter_note:
             maybe_warn_geometry_adapter(canonical_geometry.adapter_note)
-            return np.concatenate([geometry_params, np.asarray([mach, aoa_deg], dtype=np.float32)], axis=0).astype(np.float32), build_inference_geometry_semantics(
-                geometry_mode=canonical_geometry.geometry_mode,
-                geometry_representation="geometry_summary",
-                branch_encoding_type="parameter_vector_plus_flow_adapter",
-                geometry_reconstructability=canonical_geometry.reconstructability,
-                geometry_params_semantics=canonical_geometry.geometry_params_semantics,
-                notes=(
-                    canonical_geometry.adapter_note
-                    or "Runtime geometry was adapted to a checkpoint that expects geometry summary plus [mach, aoa]."
-                ),
-            )
-
-        raise ValueError(
-            "Could not build branch_inputs for this checkpoint from the provided geometry input. "
-            "This usually means the checkpoint expects a legacy branch encoding that cannot be safely reconstructed "
-            "from the selected geometry_mode. Try legacy_naca_params for NACA-style checkpoints, or use a "
-            "surface-signature-compatible checkpoint for generic_surface_points inputs."
+        return branch_inputs, build_inference_geometry_semantics(
+            geometry_mode=canonical_geometry.geometry_mode,
+            geometry_representation=representation,
+            branch_encoding_type="legacy_fixed_features",
+            geometry_reconstructability=canonical_geometry.reconstructability,
+            geometry_params_semantics=canonical_geometry.geometry_params_semantics,
+            legacy_param_source="naca4_parameter_vector" if canonical_geometry.airfoil is not None else "geometry_adapter",
+            notes=notes,
         )
 
     def _predict_surface(

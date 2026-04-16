@@ -10,6 +10,7 @@ from torch import nn
 
 from cfd_operator.config.schemas import ModelConfig
 from cfd_operator.models.base import BaseOperatorModel
+from cfd_operator.models.heads import FeatureDecoderHead, FieldDecoderHead, ScalarDecoderHead, SurfaceDecoderHead
 
 
 def _activation(name: str) -> nn.Module:
@@ -90,15 +91,25 @@ class DeepONetModel(BaseOperatorModel):
             activation=config.activation,
             dropout=config.dropout,
         )
-        self.field_head = nn.Linear(config.latent_dim, config.field_output_dim)
-        self.scalar_head = nn.Sequential(
-            nn.Linear(config.latent_dim, config.scalar_head_hidden_dim),
-            _activation(config.activation),
-            nn.Linear(config.scalar_head_hidden_dim, config.scalar_output_dim),
+        self.field_head = FieldDecoderHead(
+            nn.Linear(config.latent_dim, config.field_output_dim),
+            output_dim=config.field_output_dim,
         )
-        self.feature_head: Optional[nn.Linear]
+        self.surface_head = SurfaceDecoderHead(nn.Identity(), output_dim=config.field_output_dim)
+        self.scalar_head = ScalarDecoderHead(
+            nn.Sequential(
+                nn.Linear(config.latent_dim, config.scalar_head_hidden_dim),
+                _activation(config.activation),
+                nn.Linear(config.scalar_head_hidden_dim, config.scalar_output_dim),
+            ),
+            output_dim=config.scalar_output_dim,
+        )
+        self.feature_head: Optional[FeatureDecoderHead]
         if config.feature_output_dim > 0:
-            self.feature_head = nn.Linear(config.latent_dim, config.feature_output_dim)
+            self.feature_head = FeatureDecoderHead(
+                nn.Linear(config.latent_dim, config.feature_output_dim),
+                output_dim=config.feature_output_dim,
+            )
         else:
             self.feature_head = None
 
@@ -123,3 +134,13 @@ class DeepONetModel(BaseOperatorModel):
         if self.feature_head is not None:
             outputs["features"] = self.feature_head(combined)
         return outputs
+
+    def decoder_head_metadata(self) -> dict[str, dict[str, object]]:
+        metadata = {
+            "field": self.field_head.metadata(),
+            "surface": self.surface_head.metadata(),
+            "scalar": self.scalar_head.metadata(),
+        }
+        if self.feature_head is not None:
+            metadata["feature"] = self.feature_head.metadata()
+        return metadata

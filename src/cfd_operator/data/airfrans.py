@@ -17,6 +17,7 @@ import numpy as np
 from cfd_operator.config.schemas import DataConfig
 from cfd_operator.data.schemas import CFDSample
 from cfd_operator.data.splitting import build_generalization_splits
+from cfd_operator.geometry import BranchInputAdapter
 from cfd_operator.geometry.semantics import airfrans_geometry_semantics
 from cfd_operator.utils.io import ensure_dir, save_json
 
@@ -163,6 +164,12 @@ class AirfRANSDatasetConverter:
         simulation = airfrans.Simulation(root=str(root), name=simulation_name)
         info = parse_airfrans_simulation_name(simulation_name)
         geometry_semantics = airfrans_geometry_semantics(include_reynolds=self.config.include_reynolds)
+        branch_adapter = BranchInputAdapter(
+            branch_input_mode=self.config.branch_input_mode,
+            branch_feature_mode=self.config.branch_feature_mode,
+            signature_points=self.config.num_surface_points,
+            encoded_geometry_latent_dim=self.config.encoded_geometry_latent_dim,
+        )
 
         reynolds = float(simulation.inlet_velocity / simulation.NU)
         mach = float(simulation.inlet_velocity / simulation.C)
@@ -191,10 +198,13 @@ class AirfRANSDatasetConverter:
         scalar_targets = np.asarray([cl_components[0], cd_components[0]], dtype=np.float32)
 
         flow_conditions = np.asarray([mach, aoa_deg, reynolds], dtype=np.float32)
-        if self.config.include_reynolds:
-            branch_inputs = np.concatenate([geometry_params, flow_conditions], axis=0).astype(np.float32)
-        else:
-            branch_inputs = np.concatenate([geometry_params, flow_conditions[:2]], axis=0).astype(np.float32)
+        branch_inputs = branch_adapter.build_from_geometry_params(
+            geometry_params,
+            mach=mach,
+            aoa_deg=aoa_deg,
+            reynolds=reynolds if self.config.include_reynolds else None,
+            surface_points=surface_points,
+        )
 
         alpha = np.deg2rad(aoa_deg)
         farfield_targets = np.asarray(
@@ -230,10 +240,18 @@ class AirfRANSDatasetConverter:
             geometry_mode=geometry_semantics.geometry_mode,
             geometry_source=geometry_semantics.geometry_source,
             geometry_representation=geometry_semantics.geometry_representation,
-            branch_encoding_type=geometry_semantics.branch_encoding_type,
+            branch_encoding_type=(
+                "encoded_geometry_compatible_features"
+                if self.config.branch_input_mode == "encoded_geometry"
+                else geometry_semantics.branch_encoding_type
+            ),
             geometry_reconstructability=geometry_semantics.geometry_reconstructability,
             geometry_params_semantics=geometry_semantics.geometry_params_semantics,
             legacy_param_source=geometry_semantics.legacy_param_source,
+            branch_input_mode=self.config.branch_input_mode,
+            branch_input_source=(
+                "encoded_geometry" if self.config.branch_input_mode == "encoded_geometry" else "legacy_fixed_features"
+            ),
             geometry_points=surface_points,
             geometry_encoding_meta=geometry_semantics.as_json(),
             surface_sampling_info='{"source":"airfrans_surface_sample","ordering":"dataset_native","normalized":false}',

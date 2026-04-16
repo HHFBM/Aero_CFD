@@ -17,6 +17,7 @@ from cfd_operator.config.schemas import ProjectConfig
 from cfd_operator.data.module import CFDDataModule
 from cfd_operator.losses import CompositeLoss
 from cfd_operator.models.base import BaseOperatorModel
+from cfd_operator.tasks import build_task_request_from_loss_config
 from cfd_operator.utils.io import save_json, save_yaml
 from cfd_operator.utils.logging import setup_logger
 from cfd_operator.utils.paths import RunPaths, build_run_paths
@@ -50,6 +51,11 @@ class Trainer:
             enabled=self.config.train.mixed_precision and self.device.type == "cuda"
         )
         self.history: list[dict[str, float]] = []
+        if hasattr(self.loss_fn, "set_task_context"):
+            self.loss_fn.set_task_context(
+                dataset_capability=self.data_module.dataset_capability,
+                task_request=build_task_request_from_loss_config(self.config.loss),
+            )
         save_yaml(self.run_paths.run_dir / "config.yaml", self.config.as_dict())
 
     def _build_optimizer(self) -> torch.optim.Optimizer:
@@ -203,6 +209,11 @@ class Trainer:
             "scheduler_state": self.scheduler.state_dict() if self.scheduler is not None else None,
             "config": self.config.as_dict(),
             "normalizers": self.data_module.normalizers.to_dict() if self.data_module.normalizers is not None else None,
+            "dataset_capability": (
+                self.data_module.dataset_capability.as_dict()
+                if self.data_module.dataset_capability is not None
+                else None
+            ),
             "trainer_state": {
                 "epoch": self.state.epoch,
                 "global_step": self.state.global_step,

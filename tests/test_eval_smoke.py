@@ -17,6 +17,7 @@ from cfd_operator.evaluators import Evaluator
 from cfd_operator.inference import Predictor
 from cfd_operator.losses import CompositeLoss
 from cfd_operator.models import create_model
+from cfd_operator.tasks import CapabilityStatus, DatasetCapability
 from cfd_operator.trainers import Trainer
 
 
@@ -70,3 +71,67 @@ def test_evaluator_smoke_runs(tmp_path: Path) -> None:
     assert (output_dir / "metrics.json").exists()
     assert (output_dir / "report.md").exists()
     assert (output_dir / "report.json").exists()
+
+
+def test_evaluator_gracefully_degrades_with_limited_capability(tmp_path: Path) -> None:
+    config = ProjectConfig(
+        experiment=ExperimentConfig(name="eval_smoke_degraded", output_root=str(tmp_path), device="cpu"),
+        data=DataConfig(
+            dataset_type="synthetic",
+            dataset_path=str(tmp_path / "toy_dataset_degraded.npz"),
+            num_geometries=5,
+            conditions_per_geometry=4,
+            num_query_points=24,
+            num_surface_points=20,
+        ),
+        model=ModelConfig(hidden_dim=32, latent_dim=32, fourier_features_dim=8),
+        train=TrainConfig(epochs=1, batch_size=4, early_stopping_patience=2),
+        loss=LossConfig(use_physics=False, boundary_weight=0.0),
+        eval=EvalConfig(batch_size=4, save_plots=False, split_name="test"),
+        serve=ServeConfig(),
+    )
+    data_module = CFDDataModule(config=config.data, batch_size=config.train.batch_size)
+    data_module.setup()
+    assert data_module.payload is not None
+
+    config.model.branch_input_dim = int(data_module.payload["branch_inputs"].shape[-1])
+    config.model.trunk_input_dim = int(data_module.payload["query_points"].shape[-1])
+    config.model.field_output_dim = int(data_module.payload["field_targets"].shape[-1])
+    config.model.scalar_output_dim = int(data_module.payload["scalar_targets"].shape[-1])
+
+    model = create_model(config.model)
+    trainer = Trainer(
+        config=config,
+        model=model,
+        data_module=data_module,
+        loss_fn=CompositeLoss(config=config.loss, normalizers=data_module.normalizers),
+    )
+    trainer.fit()
+
+    data_module.dataset_capability = DatasetCapability(
+        dataset_name="degraded_eval",
+        target_capabilities={
+            "field_targets": CapabilityStatus("supervised", True, True, True, True),
+            "scalar_targets": CapabilityStatus("supervised", True, True, True, True),
+            "surface_pressure": CapabilityStatus("unavailable", False, False, False, False),
+            "surface_cp": CapabilityStatus("unavailable", False, False, False, False),
+            "slice_fields": CapabilityStatus("unavailable", False, False, False, False),
+            "pressure_gradient_indicator": CapabilityStatus("unavailable", False, False, False, False),
+            "high_gradient_mask": CapabilityStatus("unavailable", False, False, False, False),
+        },
+    )
+
+    checkpoint_path = tmp_path / "eval_smoke_degraded" / "checkpoints" / "best.pt"
+    predictor = Predictor.from_checkpoint(checkpoint_path, device="cpu")
+    evaluator = Evaluator(
+        config=config.eval,
+        model=predictor.model,
+        data_module=data_module,
+        normalizers=predictor.normalizers,
+        device="cpu",
+    )
+    metrics = evaluator.evaluate(tmp_path / "eval_report_degraded")
+    assert "field_rmse" in metrics
+    assert "cl_mae" in metrics
+    assert "cp_surface_rmse" not in metrics
+    assert "high_gradient_iou" not in metrics

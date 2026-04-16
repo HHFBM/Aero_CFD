@@ -17,6 +17,7 @@ import numpy as np
 from cfd_operator.config.schemas import DataConfig
 from cfd_operator.data.airfrans import _build_farfield_mask
 from cfd_operator.data.schemas import CFDSample
+from cfd_operator.geometry import BranchInputAdapter
 from cfd_operator.geometry.semantics import airfrans_original_geometry_semantics
 from cfd_operator.utils.io import ensure_dir, save_json
 
@@ -126,6 +127,12 @@ class AirfRANSOriginalDatasetConverter:
         scalar_values = _read_scalars_csv(scalar_blob)
         arrays = _load_cgns_arrays(mesh_blob)
         geometry_semantics = airfrans_original_geometry_semantics()
+        branch_adapter = BranchInputAdapter(
+            branch_input_mode=self.config.branch_input_mode,
+            branch_feature_mode=self.config.branch_feature_mode,
+            signature_points=self.config.num_surface_points,
+            encoded_geometry_latent_dim=self.config.encoded_geometry_latent_dim,
+        )
 
         coords = np.stack([arrays["x"], arrays["y"]], axis=1).astype(np.float32)
         velocity = np.stack([arrays["u"], arrays["v"]], axis=1).astype(np.float32)
@@ -190,12 +197,10 @@ class AirfRANSOriginalDatasetConverter:
         )
 
         geometry_params = _geometry_summary(surface_points_norm)
-        branch_inputs = np.concatenate(
-            [
-                surface_points_norm.reshape(-1).astype(np.float32),
-                np.asarray([mach, aoa_deg], dtype=np.float32),
-            ],
-            axis=0,
+        branch_inputs = branch_adapter.build_airfrans_original(
+            surface_points_norm,
+            mach=mach,
+            aoa_deg=aoa_deg,
         )
 
         flow_conditions = np.asarray([mach, aoa_deg, reynolds_proxy], dtype=np.float32)
@@ -224,10 +229,18 @@ class AirfRANSOriginalDatasetConverter:
             geometry_mode=geometry_semantics.geometry_mode,
             geometry_source=geometry_semantics.geometry_source,
             geometry_representation=geometry_semantics.geometry_representation,
-            branch_encoding_type=geometry_semantics.branch_encoding_type,
+            branch_encoding_type=(
+                "encoded_geometry_compatible_features"
+                if self.config.branch_input_mode == "encoded_geometry"
+                else geometry_semantics.branch_encoding_type
+            ),
             geometry_reconstructability=geometry_semantics.geometry_reconstructability,
             geometry_params_semantics=geometry_semantics.geometry_params_semantics,
             legacy_param_source=geometry_semantics.legacy_param_source,
+            branch_input_mode=self.config.branch_input_mode,
+            branch_input_source=(
+                "encoded_geometry" if self.config.branch_input_mode == "encoded_geometry" else "legacy_fixed_features"
+            ),
             geometry_points=surface_points_norm,
             geometry_encoding_meta=geometry_semantics.as_json(),
             surface_sampling_info='{"source":"implicit_distance_surface_pool","ordering":"angle_sorted_resampled","normalized":true}',

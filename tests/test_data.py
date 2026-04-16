@@ -54,7 +54,7 @@ def test_unseen_geometry_split_is_disjoint(tmp_path: Path) -> None:
     assert train_ids.isdisjoint(unseen_ids)
 
 
-def test_file_dataset_generic_geometry_requires_branch_encoding(tmp_path: Path) -> None:
+def test_file_dataset_generic_geometry_requires_branch_encoding_without_config(tmp_path: Path) -> None:
     frame = pd.DataFrame(
         {
             "sample_id": [0, 0, 0, 0],
@@ -83,7 +83,7 @@ def test_file_dataset_generic_geometry_requires_branch_encoding(tmp_path: Path) 
     try:
         load_dataset_payload(path)
     except ValueError as exc:
-        assert "branch_* columns" in str(exc)
+        assert "branch_* columns" in str(exc) or "DataConfig-driven geometry encoder" in str(exc)
     else:
         raise AssertionError("Expected generic tabular dataset without branch encoding to raise a clear error.")
 
@@ -120,3 +120,35 @@ def test_file_dataset_generic_geometry_with_precomputed_branch_loads(tmp_path: P
     payload = load_dataset_payload(path)
     assert payload["geometry_mode"][0] == "generic_surface_points"
     assert payload["branch_inputs"].shape == (1, 4)
+
+
+def test_file_dataset_generic_geometry_can_derive_branch_inputs_with_config(tmp_path: Path) -> None:
+    frame = pd.DataFrame(
+        {
+            "sample_id": [0, 0, 0, 0],
+            "geometry_mode": ["generic_surface_points"] * 4,
+            "geometry_x": [1.0, 0.5, 0.0, 0.5],
+            "geometry_y": [0.0, 0.1, 0.0, -0.1],
+            "mach": [0.3] * 4,
+            "aoa": [2.0] * 4,
+            "x": [0.0, 0.2, 0.4, 0.6],
+            "y": [0.0, 0.1, 0.0, -0.1],
+            "u": [1.0, 1.0, 1.0, 1.0],
+            "v": [0.0, 0.0, 0.0, 0.0],
+            "p": [1.0, 1.0, 1.0, 1.0],
+            "surface_flag": [1, 1, 1, 1],
+            "cp": [0.0, 0.0, 0.0, 0.0],
+            "cl": [0.1] * 4,
+            "cd": [0.01] * 4,
+            "fidelity_level": [0] * 4,
+            "source": ["generic_tabular"] * 4,
+            "convergence_flag": [1] * 4,
+        }
+    )
+    path = tmp_path / "generic_derived.csv"
+    frame.to_csv(path, index=False)
+    config = DataConfig(dataset_type="file", dataset_path=str(path), branch_feature_mode="points", num_surface_points=4)
+    payload = load_dataset_payload(path, config=config)
+    assert payload["geometry_mode"][0] == "generic_surface_points"
+    assert payload["branch_encoding_type"][0] == "derived_surface_signature_plus_flow"
+    assert payload["branch_inputs"].shape == (1, 10)

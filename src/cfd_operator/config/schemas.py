@@ -53,11 +53,27 @@ class DataConfig(BaseModel):
     aoa_range: Tuple[float, float] = (-2.0, 8.0)
     normalization: NormalizationConfig = Field(default_factory=NormalizationConfig)
     include_reynolds: bool = False
+    branch_input_mode: Literal["legacy_fixed_features", "encoded_geometry"] = Field(
+        default="legacy_fixed_features",
+        description=(
+            "Controls how fixed-dimension branch_inputs are produced. "
+            "'legacy_fixed_features' preserves the current path. "
+            "'encoded_geometry' first encodes raw geometry and then adapts it back to a fixed branch-compatible vector."
+        ),
+    )
     branch_feature_mode: Literal["params", "points"] = Field(
         default="params",
         description=(
-            "Geometry encoding mode for parameterized geometry helpers. "
+            "Geometry encoding mode for parameterized or generic geometry preprocessing helpers. "
+            "File-backed generic 2D airfoil datasets can use this to derive branch_inputs from geometry_points. "
             "This does not override dataset-specific encoders such as the raw AirfRANS surface-signature path."
+        ),
+    )
+    encoded_geometry_latent_dim: int = Field(
+        default=16,
+        description=(
+            "Latent size used by the lightweight GeometryEncoder when branch_input_mode='encoded_geometry'. "
+            "This mode remains optional and defaults to the legacy fixed-feature path."
         ),
     )
     field_names: Tuple[str, str, str, str] = Field(
@@ -93,6 +109,8 @@ class DataConfig(BaseModel):
             raise ValueError("field_names must contain exactly four entries: [u, v, pressure_like, aux].")
         if self.field_names[2] not in {"p", "pressure"}:
             raise ValueError("field_names[2] must describe the pressure-like channel, typically 'p'.")
+        if self.encoded_geometry_latent_dim <= 0:
+            raise ValueError("encoded_geometry_latent_dim must be positive.")
         return self
 
 

@@ -1,0 +1,113 @@
+experiment:
+  name: airfrans_geofno_scalar_heavy
+  seed: 42
+  output_root: outputs
+  device: cpu
+
+data:
+  name: airfrans_original
+  dataset_type: file
+  dataset_path: outputs/data/airfrans_original_heavy_resplit.npz
+  airfrans_root: outputs/data/airfrans_raw
+  airfrans_archive_path: outputs/data/AirfRANS_original.tar
+  airfrans_task: full
+  airfrans_download: false
+  airfrans_unzip: false
+  airfrans_max_samples: null
+  train_ratio: 0.7
+  val_ratio: 0.15
+  test_ratio: 0.15
+  num_samples: 1000
+  num_geometries: 20
+  conditions_per_geometry: 8
+  num_query_points: 1024
+  num_surface_points: 256
+  mach_range: [0.2, 0.78]
+  aoa_range: [-2.0, 8.0]
+  normalization:
+    branch: standard
+    coordinates: standard
+    fields: standard
+    scalars: standard
+  include_reynolds: false
+  branch_feature_mode: params
+  field_names: [u, v, p, nut]
+  pressure_target_mode: cp_like
+  low_fidelity_enabled: false
+  unseen_geometry_ratio: 0.15
+  unseen_condition_ratio: 0.15
+  strict_quality_checks: false
+
+model:
+  name: geofno
+  branch_input_dim: 514
+  trunk_input_dim: 2
+  field_output_dim: 4
+  scalar_output_dim: 2
+  feature_output_dim: 2
+  hidden_dim: 128
+  latent_dim: 128
+  branch_layers: 4
+  trunk_layers: 4
+  activation: gelu
+  dropout: 0.0
+  use_fourier_features: true
+  fourier_features_dim: 32
+  scalar_head_hidden_dim: 128
+  scalar_pooling_mode: mean_max_residual
+
+train:
+  epochs: 12
+  batch_size: 4
+  learning_rate: 0.001
+  weight_decay: 1.0e-6
+  optimizer: adam
+  scheduler:
+    name: cosine
+    t_max: 20
+    min_lr: 1.0e-5
+  mixed_precision: false
+  grad_clip_norm: 1.0
+  log_every_n_steps: 10
+  checkpoint_every_n_epochs: 1
+  early_stopping_patience: 4
+  resume_from: null
+
+loss:
+  field_weight: 1.0
+  surface_weight: 0.5
+  surface_pressure_weight: 0.0
+  heat_flux_weight: 0.0
+  wall_shear_weight: 0.0
+  scalar_weight: 0.75
+  slice_weight: 0.05
+  feature_weight: 0.02
+  shock_location_weight: 0.0
+  physics_weight: 0.0
+  boundary_weight: 0.05
+  field_loss_type: mse
+  scalar_loss_type: mse
+  surface_loss_type: mse
+  feature_loss_type: bce
+  use_surface_pressure_loss: false
+  use_heat_flux_loss: false
+  use_wall_shear_loss: false
+  use_slice_loss: true
+  use_feature_loss: true
+  use_shock_location_loss: false
+  use_physics: false
+  use_energy_residual: false
+
+eval:
+  batch_size: 4
+  num_visualization_samples: 3
+  save_plots: true
+  metrics_path: outputs/eval/metrics.json
+  report_path: outputs/eval/report.md
+  split_name: test
+  export_analysis: true
+
+serve:
+  host: 127.0.0.1
+  port: 8000
+  checkpoint_path: outputs/airfrans_geofno_scalar_heavy/checkpoints/best.pt

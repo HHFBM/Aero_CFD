@@ -59,7 +59,6 @@ This is the intended path for **generic 2D airfoil training data** when you want
 For a generic file dataset, the current loader expects these columns:
 
 - `sample_id`
-- `geometry_mode`
 - `mach`
 - `aoa`
 - `x`
@@ -67,18 +66,27 @@ For a generic file dataset, the current loader expects these columns:
 - `u`
 - `v`
 - `p`
-- `surface_flag`
-- `cp`
-- `cl`
-- `cd`
-- `fidelity_level`
-- `source`
-- `convergence_flag`
 
-For automatic branch encoding from geometry, also provide:
+For geometry input, provide at least one of:
 
 - `geometry_x`
 - `geometry_y`
+
+Recommended but optional columns:
+
+- `geometry_mode`
+  - defaults to `generic_surface_points` when omitted
+- `surface_flag`
+  - needed only if you want explicit surface supervision rows from the query table
+- `cp`
+  - needed only if you want `surface_cp` capability
+- `cl`
+- `cd`
+  - scalar supervision stays available when present; otherwise scalar metrics/losses should be disabled or capability-gated
+- `fidelity_level`
+- `source`
+- `convergence_flag`
+  - default compatibility values are filled when omitted
 
 ## How Automatic Branch Encoding Works
 

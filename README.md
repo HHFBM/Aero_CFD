@@ -30,6 +30,7 @@
 - `DatasetCapability` / `TaskRequest`
 - decoder heads 抽象
 - capability-aware evaluator / infer / export 兼容层
+- future native geometry backbone 的接口预留与 contract metadata
 
 ## 1. 项目定位
 
@@ -192,7 +193,7 @@
 
 最近一次全量测试结果：
 
-- `38 passed`
+- `57 passed`
 
 ## 3. AirfRANS 适配原则
 
@@ -336,7 +337,36 @@ line slice 表示沿指定二维直线抽取的局部剖面，当前支持：
 - 避免强行把 AirfRANS 点云插值成固定网格
 - 能与当前训练、评测、推理、surface/slice loss 直接兼容
 
-### 5.3 为什么当前第四通道是 `nut` 不是 `rho`
+### 5.3 当前 geometry conditioning 状态
+
+当前仓库已经明确区分两件事：
+
+1. **当前稳定主线**
+   - `geometry -> BranchInputAdapter -> fixed branch-compatible vector -> DeepONet/Geo-FNO`
+2. **未来原生几何主干预留**
+   - `geometry -> native geometry backbone -> geometry latent / tokens -> future conditioning path`
+
+当前真正启用的仍然是第一条。也就是说：
+
+- 当前训练和推理的主契约仍是 fixed-dimension `branch_inputs`
+- `encoded_geometry` 目前仍是“raw geometry -> fixed branch-compatible vector”的兼容路径
+- 本仓库**还没有**完成原生可变长几何主干升级
+- 本仓库**还没有**切换到 PointNet / Transformer / Mesh GNN 之类的 geometry token 主线
+
+阶段 7 已经新增了 future native geometry backbone 的接口预留与 metadata，但它的定位非常明确：
+
+- 默认关闭
+- 不进入当前主训练主线
+- 主要用于：
+  - 清晰描述未来接口
+  - 让 checkpoint / inference artifact 自描述 geometry backbone contract
+  - 为后续真正的可变长 geometry conditioning 升级做准备
+
+换句话说，当前系统的最准确表述是：
+
+**已经完成了从“只有 fixed branch vector 兼容逻辑”到“fixed branch path + future native geometry backbone interface reservation”的升级，但主干训练仍然走当前稳定的 fixed branch-compatible 路线。**
+
+### 5.4 为什么当前第四通道是 `nut` 不是 `rho`
 
 AirfRANS 主线是不可压缩 RANS，不是可压缩 Euler。  
 因此第 4 通道当前更合理地定义为 `nut`：
@@ -485,6 +515,16 @@ python scripts/prepare_dataset.py \
 
 这部分已经能用于 generic 2D geometry 的训练数据适配，但仍然保持与现有固定维度 `branch_inputs` 主线兼容。
 
+重要说明：
+
+- 当前 generic 2D geometry 接入已经能走训练/评测/推理的 smoke 级主路径
+- 但它仍然主要通过 `BranchInputAdapter` 落到 fixed-dimension `branch_inputs`
+- 仓库虽然已经有 future native geometry backbone 的接口预留，但这**不代表**当前 generic geometry 已经默认使用原生可变长几何主干
+- 如果后续真的要上 PointNet / Transformer / Mesh GNN，仍需要单独完成：
+  - variable-length geometry batching
+  - geometry latent / token conditioning 契约
+  - trainer/inference 的原生 geometry backbone 主路径
+
 ## 10. 训练
 
 ### 10.1 DeepONet 训练
@@ -600,6 +640,14 @@ analysis bundle 目前会导出：
 
 - [examples/analysis_outputs.md](/Users/jason/Documents/CFD/examples/analysis_outputs.md)
 - [examples/analysis_outputs_airfrans.md](/Users/jason/Documents/CFD/examples/analysis_outputs_airfrans.md)
+
+补充说明：
+
+- inference artifact 现在还会携带 `branch_contract` 和 `geometry_backbone_contract`
+- 其中 `geometry_backbone_contract` 当前主要用于说明：
+  - 当前 checkpoint 是否仍是 `fixed_branch_vector`
+  - 是否只是预留了 future native geometry backbone interface
+- 这项 metadata 的目的不是宣称已经完成原生几何主干升级，而是避免后续误读 checkpoint 的 geometry conditioning 方式
 
 ## 13. Colab Notebook
 

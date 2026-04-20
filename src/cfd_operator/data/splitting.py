@@ -64,6 +64,28 @@ def split_seen_pool(
     }
 
 
+def split_random_pool(
+    indices: np.ndarray,
+    train_ratio: float,
+    val_ratio: float,
+    rng: np.random.Generator,
+) -> Dict[str, np.ndarray]:
+    total = indices.shape[0]
+    if total < 3:
+        raise ValueError("Pool is too small to form train/val/test splits.")
+    shuffled = indices.copy()
+    rng.shuffle(shuffled)
+    train_end = max(1, int(round(total * train_ratio)))
+    train_end = min(train_end, total - 2)
+    val_count = max(1, int(round(total * val_ratio)))
+    val_end = min(train_end + val_count, total - 1)
+    return {
+        "train_indices": np.sort(shuffled[:train_end]),
+        "val_indices": np.sort(shuffled[train_end:val_end]),
+        "test_indices": np.sort(shuffled[val_end:]),
+    }
+
+
 def build_generalization_splits(
     geometry_ids: np.ndarray,
     primary_condition_values: np.ndarray,
@@ -113,3 +135,49 @@ def build_generalization_splits(
         "test_unseen_geometry_indices": np.sort(np.where(unseen_geometry_mask)[0]),
         "test_unseen_condition_indices": np.sort(np.where(unseen_condition_mask & ~unseen_geometry_mask)[0]),
     }
+
+
+def build_frozen_benchmark_splits(
+    geometry_ids: np.ndarray,
+    *,
+    benchmark_holdout_ratio: float,
+    train_ratio: float,
+    val_ratio: float,
+    rng: np.random.Generator,
+) -> Dict[str, np.ndarray]:
+    """Build a frozen benchmark holdout plus development train/val/test splits.
+
+    The benchmark holdout is sampled first from the full dataset and is then
+    excluded from the normal train/val/test development loop.
+    """
+
+    if not (0.0 < benchmark_holdout_ratio < 0.5):
+        raise ValueError("benchmark_holdout_ratio must be in (0, 0.5).")
+    total = int(geometry_ids.shape[0])
+    if total < 10:
+        raise ValueError("Dataset is too small to create a frozen benchmark holdout.")
+
+    all_indices = np.arange(total, dtype=np.int64)
+    num_holdout = max(1, int(round(total * benchmark_holdout_ratio)))
+    benchmark_holdout_indices = np.sort(rng.choice(all_indices, size=num_holdout, replace=False))
+    main_pool_indices = np.setdiff1d(all_indices, benchmark_holdout_indices, assume_unique=False)
+    if main_pool_indices.shape[0] < 3:
+        raise ValueError("Main development pool is too small after removing benchmark_holdout.")
+
+    try:
+        split_payload = split_seen_pool(
+            indices=main_pool_indices,
+            geometry_ids=geometry_ids,
+            train_ratio=train_ratio,
+            val_ratio=val_ratio,
+            rng=rng,
+        )
+    except ValueError:
+        split_payload = split_random_pool(
+            indices=main_pool_indices,
+            train_ratio=train_ratio,
+            val_ratio=val_ratio,
+            rng=rng,
+        )
+    split_payload["benchmark_holdout_indices"] = benchmark_holdout_indices
+    return split_payload

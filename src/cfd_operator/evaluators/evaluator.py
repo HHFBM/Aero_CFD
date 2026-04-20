@@ -12,8 +12,9 @@ import torch
 
 from cfd_operator.config.schemas import EvalConfig
 from cfd_operator.data.module import CFDDataModule, NormalizerBundle
-from cfd_operator.evaluators.metrics import mae
+from cfd_operator.evaluators.metrics import compute_masked_region_metrics, mae
 from cfd_operator.evaluators.registry import build_default_metric_registry
+from cfd_operator.hard_regions import query_region_masks_np, surface_region_masks_np
 from cfd_operator.models.base import BaseOperatorModel
 from cfd_operator.output_semantics import build_output_semantics, flatten_metric_groups
 from cfd_operator.postprocess import (
@@ -56,6 +57,7 @@ class Evaluator:
         plot_paths: list[str] = []
         exported_files: list[str] = []
         metric_groups: dict[str, dict[str, float]] = {}
+        skipped_metric_groups: dict[str, str] = {}
         metric_registry = build_default_metric_registry()
         capability = self.data_module.dataset_capability
         effective_tasks = (
@@ -82,6 +84,15 @@ class Evaluator:
         pressure_gradient_pred_all: list[np.ndarray] = []
         shock_location_true_all: list[np.ndarray] = []
         shock_location_pred_all: list[np.ndarray] = []
+        local_region_field_true_all: list[np.ndarray] = []
+        local_region_field_pred_all: list[np.ndarray] = []
+        local_region_high_mask_all: list[np.ndarray] = []
+        local_region_near_wall_mask_all: list[np.ndarray] = []
+        local_region_wake_mask_all: list[np.ndarray] = []
+        local_region_cp_true_all: list[np.ndarray] = []
+        local_region_cp_pred_all: list[np.ndarray] = []
+        local_region_leading_edge_mask_all: list[np.ndarray] = []
+        sample_records: list[dict[str, Any]] = []
 
         saved_samples = 0
 
@@ -156,8 +167,26 @@ class Evaluator:
                     gradient_pred = np.stack(gradient_pred_list)
 
                 for batch_index in range(field_pred.shape[0]):
+                    query_points_np = batch["query_points_raw"][batch_index].cpu().numpy()
+                    surface_points_np = batch["surface_points_raw"][batch_index].cpu().numpy()
+                    region_masks = query_region_masks_np(
+                        query_points_np,
+                        surface_points_np,
+                        high_gradient_mask=batch["high_gradient_mask"][batch_index].cpu().numpy(),
+                        near_wall_distance_fraction=0.12,
+                    )
+                    local_region_field_true_all.append(field_true[batch_index])
+                    local_region_field_pred_all.append(field_pred[batch_index])
+                    local_region_high_mask_all.append(region_masks["high_gradient"].astype(np.float32))
+                    local_region_near_wall_mask_all.append(region_masks["near_wall"].astype(np.float32))
+                    local_region_wake_mask_all.append(region_masks["wake"].astype(np.float32))
+                    if cp_true is not None and cp_pred is not None:
+                        surface_region_masks = surface_region_masks_np(surface_points_np)
+                        local_region_cp_true_all.append(cp_true[batch_index])
+                        local_region_cp_pred_all.append(cp_pred[batch_index])
+                        local_region_leading_edge_mask_all.append(surface_region_masks["leading_edge"].astype(np.float32))
                     summary = estimate_shock_location(
-                        points=batch["query_points_raw"][batch_index].cpu().numpy(),
+                        points=query_points_np,
                         shock_indicator=pressure_gradient_pred[batch_index],
                         gradient_magnitude=gradient_pred[batch_index],
                     )
@@ -166,6 +195,34 @@ class Evaluator:
                         shock_location_pred_all.append(np.asarray([np.nan, np.nan], dtype=np.float32))
                     else:
                         shock_location_pred_all.append(np.asarray(summary["centroid"], dtype=np.float32))
+                    sample_records.append(
+                        {
+                            "sample_id": int(len(sample_records)),
+                            "case_id": str(batch["airfoil_id"][batch_index]),
+                            "field_rmse": float(np.sqrt(np.mean((field_pred[batch_index] - field_true[batch_index]) ** 2))),
+                            "cl_abs_error": float(abs(scalar_pred[batch_index, 0] - scalar_true[batch_index, 0])),
+                            "cd_abs_error": float(abs(scalar_pred[batch_index, 1] - scalar_true[batch_index, 1])),
+                            "cp_surface_rmse": (
+                                float(np.sqrt(np.mean((cp_pred[batch_index] - cp_true[batch_index]) ** 2)))
+                                if cp_pred is not None and cp_true is not None
+                                else None
+                            ),
+                            "split_name": self.config.split_name,
+                            "query_points": query_points_np,
+                            "field_pred": field_pred[batch_index],
+                            "field_true": field_true[batch_index],
+                            "surface_points": surface_points_np,
+                            "cp_pred": None if cp_pred is None else cp_pred[batch_index],
+                            "cp_true": None if cp_true is None else cp_true[batch_index],
+                            "pressure_pred": None if surface_pressure_pred is None else surface_pressure_pred[batch_index],
+                            "pressure_true": None if surface_pressure_true is None else surface_pressure_true[batch_index],
+                            "slice_points": None if slice_true is None else batch["slice_points_raw"][batch_index].cpu().numpy(),
+                            "slice_pred": None if slice_pred is None else slice_pred[batch_index],
+                            "slice_true": None if slice_true is None else slice_true[batch_index],
+                            "feature_indicator": None if not effective_tasks.feature else high_pred[batch_index],
+                            "feature_true": None if not effective_tasks.feature else batch["high_gradient_mask"][batch_index].cpu().numpy(),
+                        }
+                    )
 
                 field_true_all.append(field_true.reshape(-1, field_true.shape[-1]))
                 field_pred_all.append(field_pred.reshape(-1, field_pred.shape[-1]))
@@ -356,12 +413,16 @@ class Evaluator:
                     field_pred_np,
                     aux_name=str(self.data_module.config.field_names[3]),
                 )
+            elif group_name == "field_metrics":
+                skipped_metric_groups[group_name] = "Skipped because field supervision is unavailable for this dataset capability."
             elif group_name == "scalar_metrics" and effective_tasks.scalar:
                 metric_groups[group_name] = spec.computer(
                     scalar_true_np,
                     scalar_pred_np,
                     scalar_names=("cl", "cd"),
                 )
+            elif group_name == "scalar_metrics":
+                skipped_metric_groups[group_name] = "Skipped because scalar supervision is unavailable for this dataset capability."
             elif (
                 group_name == "surface_metrics"
                 and effective_tasks.surface
@@ -376,8 +437,12 @@ class Evaluator:
                     pressure_true_np,
                     pressure_pred_np,
                 )
+            elif group_name == "surface_metrics":
+                skipped_metric_groups[group_name] = "Skipped because surface supervision is unavailable or not evaluable for this dataset capability."
             elif group_name == "slice_metrics" and effective_tasks.slice and slice_true_np is not None and slice_pred_np is not None:
                 metric_groups[group_name] = spec.computer(slice_true_np, slice_pred_np)
+            elif group_name == "slice_metrics":
+                skipped_metric_groups[group_name] = "Skipped because slice supervision is unavailable for this dataset capability."
             elif (
                 group_name == "feature_metrics"
                 and effective_tasks.feature
@@ -392,6 +457,8 @@ class Evaluator:
                     high_true_np,
                     high_pred_np,
                 )
+            elif group_name == "feature_metrics":
+                skipped_metric_groups[group_name] = "Skipped because feature supervision is unavailable for this dataset capability."
         metrics = flatten_metric_groups(metric_groups)
         if np.any(shock_location_valid):
             metrics["shock_location_mae"] = mae(
@@ -399,6 +466,46 @@ class Evaluator:
                 shock_location_pred_np[shock_location_valid],
             )
             metric_groups.setdefault("feature_metrics", {})["shock_location_mae"] = metrics["shock_location_mae"]
+        if local_region_field_true_all:
+            local_region_metrics: dict[str, float] = {}
+            field_true_local = np.concatenate(local_region_field_true_all, axis=0)
+            field_pred_local = np.concatenate(local_region_field_pred_all, axis=0)
+            local_region_metrics.update(
+                compute_masked_region_metrics(
+                    field_true_local,
+                    field_pred_local,
+                    np.concatenate(local_region_high_mask_all, axis=0),
+                    prefix="high_gradient_field",
+                )
+            )
+            local_region_metrics.update(
+                compute_masked_region_metrics(
+                    field_true_local,
+                    field_pred_local,
+                    np.concatenate(local_region_near_wall_mask_all, axis=0),
+                    prefix="near_wall_field",
+                )
+            )
+            local_region_metrics.update(
+                compute_masked_region_metrics(
+                    field_true_local,
+                    field_pred_local,
+                    np.concatenate(local_region_wake_mask_all, axis=0),
+                    prefix="wake_field",
+                )
+            )
+            if local_region_cp_true_all:
+                local_region_metrics.update(
+                    compute_masked_region_metrics(
+                        np.concatenate(local_region_cp_true_all, axis=0),
+                        np.concatenate(local_region_cp_pred_all, axis=0),
+                        np.concatenate(local_region_leading_edge_mask_all, axis=0),
+                        prefix="leading_edge_cp",
+                    )
+                )
+            if local_region_metrics:
+                metric_groups["local_region_metrics"] = local_region_metrics
+                metrics.update(local_region_metrics)
 
         if self.config.save_plots:
             plot_scalar_scatter(
@@ -421,10 +528,19 @@ class Evaluator:
                 plot_paths.append(str(output_dir / "loss_curve.png"))
 
         save_json(output_dir / "metrics.json", metrics)
+        self._write_metrics_flat_csv(output_dir, metric_groups)
+        self._export_selected_cases(
+            output_dir=output_dir,
+            sample_records=sample_records,
+            field_names=list(self.data_module.config.field_names),
+            plot_paths=plot_paths,
+            exported_files=exported_files,
+        )
         self._write_report(
             output_dir=output_dir,
             metrics=metrics,
             metric_groups=metric_groups,
+            skipped_metric_groups=skipped_metric_groups,
             plot_paths=plot_paths,
             exported_files=exported_files,
         )
@@ -435,11 +551,13 @@ class Evaluator:
         output_dir: Path,
         metrics: dict[str, float],
         metric_groups: dict[str, dict[str, float]],
+        skipped_metric_groups: dict[str, str],
         plot_paths: list[str],
         exported_files: list[str],
     ) -> None:
         report_path = output_dir / "report.md"
         report_json_path = output_dir / "report.json"
+        split_role = "frozen_benchmark" if self.config.split_name == "benchmark_holdout" else "development_eval"
         semantics = build_output_semantics(
             field_names=list(self.data_module.config.field_names),
             pressure_target_mode=self.data_module.config.pressure_target_mode,
@@ -457,6 +575,11 @@ class Evaluator:
             for key, value in group_metrics.items():
                 lines.append(f"- {key}: {value:.6f}")
             lines.append("")
+        if skipped_metric_groups:
+            lines.extend(["## Skipped Metric Groups", ""])
+            for group_name, reason in skipped_metric_groups.items():
+                lines.append(f"- {group_name}: {reason}")
+            lines.append("")
         lines.extend(
             [
                 "## Notes",
@@ -470,6 +593,8 @@ class Evaluator:
                 f"- Evaluated split: `{self.config.split_name}`.",
             ]
         )
+        if split_role == "frozen_benchmark":
+            lines.append("- This split is the frozen benchmark split (`benchmark_holdout`) and must not be used for training, early stopping, or model selection.")
         if exported_files:
             lines.extend(["", "## Exported Analysis Files", ""])
             for path in exported_files:
@@ -487,9 +612,11 @@ class Evaluator:
                     "num_visualization_samples": self.config.num_visualization_samples,
                     "save_plots": self.config.save_plots,
                     "split_name": self.config.split_name,
+                    "split_role": split_role,
                 },
                 "metrics": metrics,
                 "metric_groups": metric_groups,
+                "skipped_metric_groups": skipped_metric_groups,
                 "dataset_capability": (
                     self.data_module.dataset_capability.as_dict()
                     if self.data_module.dataset_capability is not None
@@ -501,3 +628,123 @@ class Evaluator:
                 "exports": exported_files,
             },
         )
+
+    def _write_metrics_flat_csv(self, output_dir: Path, metric_groups: dict[str, dict[str, float]]) -> None:
+        rows: list[dict[str, Any]] = []
+        for group_name, group_metrics in metric_groups.items():
+            task_family = group_name.removesuffix("_metrics")
+            for metric_name, value in group_metrics.items():
+                rows.append(
+                    {
+                        "split_name": self.config.split_name,
+                        "task_family": task_family,
+                        "metric_group": group_name,
+                        "metric_name": metric_name,
+                        "value": float(value),
+                    }
+                )
+        pd.DataFrame(rows).to_csv(output_dir / "metrics_flat.csv", index=False)
+
+    def _export_selected_cases(
+        self,
+        output_dir: Path,
+        sample_records: list[dict[str, Any]],
+        field_names: list[str],
+        plot_paths: list[str],
+        exported_files: list[str],
+    ) -> None:
+        if not sample_records:
+            return
+        ordered = sorted(sample_records, key=lambda item: float(item["field_rmse"]))
+        selection = {
+            "best": ordered[0],
+            "median": ordered[len(ordered) // 2],
+            "worst": ordered[-1],
+        }
+        selection_summary = {
+            label: {
+                "sample_id": int(record["sample_id"]),
+                "case_id": str(record["case_id"]),
+                "field_rmse": float(record["field_rmse"]),
+                "cl_abs_error": float(record["cl_abs_error"]),
+                "cd_abs_error": float(record["cd_abs_error"]),
+                "cp_surface_rmse": None if record["cp_surface_rmse"] is None else float(record["cp_surface_rmse"]),
+            }
+            for label, record in selection.items()
+        }
+        save_json(output_dir / "selected_cases.json", selection_summary)
+        exported_files.append(str(output_dir / "selected_cases.json"))
+
+        for label, record in selection.items():
+            case_dir = output_dir / "cases" / label
+            case_dir.mkdir(parents=True, exist_ok=True)
+            analysis_payload = {
+                "query_points": record["query_points"],
+                "predicted_fields": record["field_pred"],
+                "predicted_scalars": {
+                    "cl": float(record["cl_abs_error"]),
+                    "cd": float(record["cd_abs_error"]),
+                },
+                "metadata": {
+                    "field_names": field_names,
+                    "scalar_names": ["cl_abs_error", "cd_abs_error"],
+                    "selection_label": label,
+                    "case_id": record["case_id"],
+                    "split_name": self.config.split_name,
+                },
+            }
+            if record["cp_pred"] is not None and record["pressure_pred"] is not None:
+                analysis_payload["surface_predictions"] = {
+                    "surface_points": record["surface_points"],
+                    "cp_surface": record["cp_pred"],
+                    "pressure_surface": record["pressure_pred"],
+                }
+            if record["slice_pred"] is not None and record["slice_points"] is not None:
+                analysis_payload["slice_predictions"] = [
+                    {
+                        "slice_definition": {"type": "selected_case_slice"},
+                        "slice_points": record["slice_points"],
+                        "slice_fields": record["slice_pred"],
+                    }
+                ]
+            if record["feature_indicator"] is not None:
+                analysis_payload["feature_predictions"] = {
+                    "high_gradient_mask": record["feature_indicator"],
+                }
+            export_analysis_bundle(case_dir, analysis_payload)
+            exported_files.append(str(case_dir / "predictions.json"))
+
+            if self.config.save_plots:
+                if record["cp_pred"] is not None and record["cp_true"] is not None:
+                    plot_surface_cp(
+                        record["surface_points"],
+                        cp_pred=np.asarray(record["cp_pred"]).reshape(-1),
+                        cp_true=np.asarray(record["cp_true"]).reshape(-1),
+                        save_path=case_dir / "surface_cp.png",
+                    )
+                    plot_paths.append(str(case_dir / "surface_cp.png"))
+                if record["pressure_pred"] is not None and record["pressure_true"] is not None:
+                    plot_surface_pressure(
+                        record["surface_points"],
+                        pressure_pred=np.asarray(record["pressure_pred"]).reshape(-1),
+                        pressure_true=np.asarray(record["pressure_true"]).reshape(-1),
+                        save_path=case_dir / "surface_pressure.png",
+                    )
+                    plot_paths.append(str(case_dir / "surface_pressure.png"))
+                if record["slice_pred"] is not None and record["slice_true"] is not None and record["slice_points"] is not None:
+                    for field_index, field_name in enumerate(field_names):
+                        plot_slice_field(
+                            np.asarray(record["slice_points"]),
+                            pred_values=np.asarray(record["slice_pred"])[:, field_index],
+                            true_values=np.asarray(record["slice_true"])[:, field_index],
+                            variable_name=str(field_name),
+                            save_path=case_dir / f"slice_{field_name}.png",
+                        )
+                        plot_paths.append(str(case_dir / f"slice_{field_name}.png"))
+                if record["feature_indicator"] is not None:
+                    plot_high_gradient_regions(
+                        points=np.asarray(record["query_points"]),
+                        indicator=np.asarray(record["feature_indicator"]).reshape(-1),
+                        save_path=case_dir / "high_gradient_regions.png",
+                    )
+                    plot_paths.append(str(case_dir / "high_gradient_regions.png"))

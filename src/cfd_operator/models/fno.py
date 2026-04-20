@@ -18,6 +18,7 @@ from torch import nn
 from cfd_operator.config.schemas import ModelConfig
 from cfd_operator.models.base import BaseOperatorModel
 from cfd_operator.models.deeponet import MLP, _activation
+from cfd_operator.models.geometry_backbone import build_geometry_backbone_contract
 from cfd_operator.models.heads import FeatureDecoderHead, FieldDecoderHead, ScalarDecoderHead, SurfaceDecoderHead
 
 
@@ -126,6 +127,11 @@ class GeoFNOModel(BaseOperatorModel):
         self.coord_dim = config.trunk_input_dim
         self.channels = config.latent_dim
         self.num_modes = max(4, config.fourier_features_dim // 4)
+        self.scalar_pooling_mode = (
+            "mean_max_residual"
+            if config.scalar_pooling_mode == "default"
+            else config.scalar_pooling_mode
+        )
 
         if self.coord_dim != 2:
             raise ValueError("GeoFNOModel currently expects 2D query points.")
@@ -179,6 +185,18 @@ class GeoFNOModel(BaseOperatorModel):
             ),
             output_dim=config.scalar_output_dim,
         )
+        if self.scalar_pooling_mode == "mean_max_residual":
+            self.scalar_context_residual = nn.Sequential(
+                nn.Linear(self.channels * 2, config.scalar_head_hidden_dim),
+                _activation(config.activation),
+                nn.Linear(config.scalar_head_hidden_dim, self.channels),
+            )
+            final_linear = self.scalar_context_residual[-1]
+            assert isinstance(final_linear, nn.Linear)
+            nn.init.zeros_(final_linear.weight)
+            nn.init.zeros_(final_linear.bias)
+        else:
+            self.scalar_context_residual = None
         if config.feature_output_dim > 0:
             self.feature_head: Optional[FeatureDecoderHead] = FeatureDecoderHead(
                 nn.Sequential(
@@ -207,8 +225,18 @@ class GeoFNOModel(BaseOperatorModel):
             hidden = block(hidden, query_points, condition_proj(branch_latent))
 
         fields = self.field_head(hidden)
-        pooled = hidden.mean(dim=1)
-        scalars = self.scalar_head(torch.cat([branch_latent, pooled], dim=-1))
+        pooled_mean = hidden.mean(dim=1)
+        if self.scalar_pooling_mode == "branch_only":
+            scalar_context = branch_latent
+        elif self.scalar_pooling_mode == "mean":
+            scalar_context = pooled_mean
+        elif self.scalar_pooling_mode == "mean_max_residual":
+            pooled_max = hidden.amax(dim=1)
+            residual = self.scalar_context_residual(torch.cat([pooled_mean, pooled_max], dim=-1))
+            scalar_context = pooled_mean + residual
+        else:
+            raise ValueError(f"Unsupported GeoFNO scalar_pooling_mode: {self.scalar_pooling_mode}")
+        scalars = self.scalar_head(torch.cat([branch_latent, scalar_context], dim=-1))
         outputs: dict[str, torch.Tensor] = {
             "fields": fields,
             "scalars": scalars,
@@ -225,6 +253,10 @@ class GeoFNOModel(BaseOperatorModel):
             "surface": self.surface_head.metadata(),
             "scalar": self.scalar_head.metadata(),
         }
+        metadata["scalar"]["aggregation"] = self.scalar_pooling_mode
         if self.feature_head is not None:
             metadata["feature"] = self.feature_head.metadata()
         return metadata
+
+    def geometry_backbone_metadata(self) -> dict[str, object] | None:
+        return build_geometry_backbone_contract(self.config).as_dict()

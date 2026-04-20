@@ -111,6 +111,23 @@ def _safe_float(array: np.ndarray | None) -> float | None:
     return value
 
 
+def _available_from_legacy_payload(
+    payload: dict[str, Any],
+    *,
+    key: str,
+    index: int,
+    flag_keys: tuple[str, ...] = (),
+) -> bool:
+    for flag_key in flag_keys:
+        if flag_key in payload:
+            values = np.asarray(payload[flag_key][index], dtype=np.float32).reshape(-1)
+            return bool(values.size > 0 and np.any(values > 0.0))
+    if key not in payload:
+        return False
+    values = np.asarray(payload[key][index])
+    return bool(values.size > 0)
+
+
 def sample_from_legacy_payload(
     payload: dict[str, Any],
     index: int,
@@ -166,16 +183,65 @@ def sample_from_legacy_payload(
 
     available: dict[str, bool] = {
         "field_targets": field_targets is not None,
-        "scalar_targets": scalar_values.size > 0,
-        "surface_pressure": "surface_pressure" in surface_targets,
-        "surface_cp": "surface_cp" in surface_targets,
-        "slice_fields": "slice_fields" in query_targets,
-        "pressure_gradient_indicator": "pressure_gradient_indicator" in feature_targets,
-        "high_gradient_mask": "high_gradient_mask" in feature_targets,
-        "shock_indicator": "shock_indicator" in feature_targets,
-        "shock_location": "shock_location" in feature_targets,
-        "surface_heat_flux": "surface_heat_flux" in surface_targets,
-        "surface_wall_shear": "surface_wall_shear" in surface_targets,
+        "scalar_targets": _available_from_legacy_payload(
+            payload,
+            key="scalar_targets",
+            index=index,
+            flag_keys=("scalar_targets_available",),
+        ),
+        "surface_pressure": _available_from_legacy_payload(
+            payload,
+            key="surface_pressure",
+            index=index,
+            flag_keys=("surface_pressure_available",),
+        ),
+        "surface_cp": _available_from_legacy_payload(
+            payload,
+            key="surface_cp",
+            index=index,
+            flag_keys=("surface_cp_available", "surface_pressure_available"),
+        ),
+        "slice_fields": _available_from_legacy_payload(
+            payload,
+            key="slice_fields",
+            index=index,
+            flag_keys=("slice_available",),
+        ),
+        "pressure_gradient_indicator": _available_from_legacy_payload(
+            payload,
+            key="pressure_gradient_indicator",
+            index=index,
+            flag_keys=("feature_available",),
+        ),
+        "high_gradient_mask": _available_from_legacy_payload(
+            payload,
+            key="high_gradient_mask",
+            index=index,
+            flag_keys=("feature_available",),
+        ),
+        "shock_indicator": _available_from_legacy_payload(
+            payload,
+            key="shock_indicator",
+            index=index,
+        ),
+        "shock_location": _available_from_legacy_payload(
+            payload,
+            key="shock_location",
+            index=index,
+            flag_keys=("shock_location_available",),
+        ),
+        "surface_heat_flux": _available_from_legacy_payload(
+            payload,
+            key="surface_heat_flux",
+            index=index,
+            flag_keys=("surface_heat_flux_available",),
+        ),
+        "surface_wall_shear": _available_from_legacy_payload(
+            payload,
+            key="surface_wall_shear",
+            index=index,
+            flag_keys=("surface_wall_shear_available",),
+        ),
     }
     derived = {
         "surface_cp": True,

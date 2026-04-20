@@ -35,8 +35,15 @@ class BaseOperatorModel(nn.Module, ABC):
     def decoder_head_metadata(self) -> dict[str, dict[str, object]]:
         return {}
 
+    def geometry_backbone_metadata(self) -> dict[str, object] | None:
+        return None
+
     def model_metadata(self) -> dict[str, Any]:
-        return {
+        metadata: dict[str, Any] = {
             "class_name": self.__class__.__name__,
             "decoder_heads": self.decoder_head_metadata(),
         }
+        geometry_backbone = self.geometry_backbone_metadata()
+        if geometry_backbone is not None:
+            metadata["geometry_backbone"] = geometry_backbone
+        return metadata

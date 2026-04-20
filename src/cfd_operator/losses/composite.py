@@ -10,18 +10,33 @@ import torch.nn.functional as F
 
 from cfd_operator.config.schemas import LossConfig
 from cfd_operator.data.module import NormalizerBundle
+from cfd_operator.hard_regions import query_region_masks_torch, surface_region_masks_torch
+from cfd_operator.losses.physics_losses import compute_physics_informed_loss
 from cfd_operator.models.base import BaseOperatorModel
-from cfd_operator.physics import compressible_euler_residuals, incompressible_rans_proxy_residuals
 from cfd_operator.tasks.capabilities import DatasetCapability, EffectiveTaskSet, TaskRequest, resolve_effective_tasks
 
 
-def masked_reduce(loss: torch.Tensor, mask: Optional[torch.Tensor], reduction: str = "mean") -> torch.Tensor:
-    if mask is None:
+def masked_reduce(
+    loss: torch.Tensor,
+    mask: Optional[torch.Tensor],
+    reduction: str = "mean",
+    weight: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
+    if mask is None and weight is None:
         return loss.mean() if reduction == "mean" else loss.sum()
-    while mask.ndim < loss.ndim:
-        mask = mask.unsqueeze(-1)
-    weighted = loss * mask
-    denominator = mask.sum().clamp_min(1.0)
+    effective = None
+    if mask is not None:
+        effective = mask
+        while effective.ndim < loss.ndim:
+            effective = effective.unsqueeze(-1)
+    if weight is not None:
+        effective_weight = weight
+        while effective_weight.ndim < loss.ndim:
+            effective_weight = effective_weight.unsqueeze(-1)
+        effective = effective_weight if effective is None else (effective * effective_weight)
+    assert effective is not None
+    weighted = loss * effective
+    denominator = effective.sum().clamp_min(1.0)
     if reduction == "mean":
         return weighted.sum() / denominator
     return weighted.sum()
@@ -32,11 +47,12 @@ def regression_loss(
     target: torch.Tensor,
     loss_type: str = "mse",
     mask: Optional[torch.Tensor] = None,
+    weight: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     if loss_type == "mse":
-        return masked_reduce((prediction - target) ** 2, mask=mask, reduction="mean")
+        return masked_reduce((prediction - target) ** 2, mask=mask, reduction="mean", weight=weight)
     if loss_type == "mae":
-        return masked_reduce((prediction - target).abs(), mask=mask, reduction="mean")
+        return masked_reduce((prediction - target).abs(), mask=mask, reduction="mean", weight=weight)
     raise ValueError(f"Unsupported loss type: {loss_type}")
 
 
@@ -73,6 +89,8 @@ class CompositeLoss:
     pressure_target_mode: str = "raw"
     dataset_capability: DatasetCapability | None = None
     task_request: TaskRequest | None = None
+    current_epoch: int = 0
+    current_step: int = 0
 
     def set_task_context(
         self,
@@ -82,6 +100,10 @@ class CompositeLoss:
     ) -> None:
         self.dataset_capability = dataset_capability
         self.task_request = task_request
+
+    def set_schedule_context(self, *, epoch: int, global_step: int) -> None:
+        self.current_epoch = int(epoch)
+        self.current_step = int(global_step)
 
     def _effective_tasks(self) -> EffectiveTaskSet | None:
         if self.dataset_capability is None or self.task_request is None:
@@ -95,11 +117,15 @@ class CompositeLoss:
         outputs: dict[str, torch.Tensor],
     ) -> Tuple[torch.Tensor, Dict[str, float]]:
         effective_tasks = self._effective_tasks()
+        query_region_weights = self._query_region_weights(batch=batch)
+        surface_region_weights = self._surface_region_weights(batch=batch)
+        slice_region_weights = self._slice_region_weights(batch=batch)
         field_loss = regression_loss(
             outputs["fields"],
             batch["field_targets"],
             loss_type=self.config.field_loss_type,
             mask=batch["query_mask"],
+            weight=query_region_weights,
         )
         if effective_tasks is not None and not effective_tasks.field:
             field_loss = batch["field_targets"].new_zeros(())
@@ -115,14 +141,33 @@ class CompositeLoss:
         surface_pressure_loss = self._surface_pressure_loss(model=model, batch=batch) if effective_tasks is None or effective_tasks.surface else batch["field_targets"].new_zeros(())
         heat_flux_loss = self._surface_heat_flux_loss(model=model, batch=batch) if effective_tasks is None or effective_tasks.surface else batch["field_targets"].new_zeros(())
         wall_shear_loss = self._surface_wall_shear_loss(model=model, batch=batch) if effective_tasks is None or effective_tasks.surface else batch["field_targets"].new_zeros(())
+        physics_bundle = (
+            compute_physics_informed_loss(
+                model=model,
+                batch=batch,
+                config=self.config,
+                normalizers=self.normalizers,
+                field_names=self.field_names,
+                pressure_target_mode=self.pressure_target_mode,
+                current_epoch=self.current_epoch,
+                current_step=self.current_step,
+            )
+            if self.config.use_physics or self.config.boundary_weight > 0.0 or self.config.consistency_weight > 0.0
+            else None
+        )
         physics_loss = (
-            self._physics_loss(model=model, batch=batch)
-            if self.config.use_physics and (effective_tasks is None or effective_tasks.consistency)
+            physics_bundle["pde_total"]
+            if physics_bundle is not None and self.config.use_physics and (effective_tasks is None or effective_tasks.consistency)
             else torch.zeros_like(field_loss)
         )
         boundary_loss = (
-            self._boundary_loss(model=model, batch=batch, outputs=outputs)
-            if effective_tasks is None or effective_tasks.consistency
+            physics_bundle["boundary"]
+            if physics_bundle is not None and (effective_tasks is None or effective_tasks.consistency)
+            else batch["field_targets"].new_zeros(())
+        )
+        consistency_loss = (
+            physics_bundle["consistency"]
+            if physics_bundle is not None and (effective_tasks is None or effective_tasks.consistency)
             else batch["field_targets"].new_zeros(())
         )
         slice_loss = self._slice_loss(model=model, batch=batch) if effective_tasks is None or effective_tasks.slice else batch["field_targets"].new_zeros(())
@@ -141,6 +186,7 @@ class CompositeLoss:
             + self.config.shock_location_weight * shock_location_loss
             + self.config.physics_weight * physics_loss
             + self.config.boundary_weight * boundary_loss
+            + self.config.consistency_weight * consistency_loss
         )
         metrics = {
             "loss_total": float(total_loss.detach().cpu()),
@@ -155,14 +201,31 @@ class CompositeLoss:
             "loss_shock_location": float(shock_location_loss.detach().cpu()),
             "loss_physics": float(physics_loss.detach().cpu()),
             "loss_boundary": float(boundary_loss.detach().cpu()),
+            "loss_consistency": float(consistency_loss.detach().cpu()),
+            "query_hard_weight_mean": float(query_region_weights.mean().detach().cpu()),
+            "surface_hard_weight_mean": float(surface_region_weights.mean().detach().cpu()) if surface_region_weights.numel() > 0 else 1.0,
+            "slice_hard_weight_mean": float(slice_region_weights.mean().detach().cpu()) if slice_region_weights.numel() > 0 else 1.0,
         }
+        if physics_bundle is not None:
+            metrics["loss_continuity"] = float(physics_bundle["continuity"].detach().cpu())
+            metrics["loss_momentum_x"] = float(physics_bundle["momentum_x"].detach().cpu())
+            metrics["loss_momentum_y"] = float(physics_bundle["momentum_y"].detach().cpu())
+            metrics["loss_nut_transport_proxy"] = float(physics_bundle["nut_transport_proxy"].detach().cpu())
+            schedule_multiplier = physics_bundle["diagnostics"].get("schedule_multiplier", 1.0)
+            metrics["physics_schedule_multiplier"] = float(schedule_multiplier)
         return total_loss, metrics
 
     def _surface_cp_loss(self, model: BaseOperatorModel, batch: dict[str, Any]) -> torch.Tensor:
         surface_outputs = model.loss_outputs(batch["branch_inputs"], batch["surface_points"])
         surface_fields = self.normalizers.fields.inverse_transform_tensor(surface_outputs["fields"])
         cp_pred = self._surface_cp_prediction(surface_fields=surface_fields, batch=batch)
-        return regression_loss(cp_pred, batch["surface_cp"], loss_type=self.config.surface_loss_type, mask=batch["surface_mask"])
+        return regression_loss(
+            cp_pred,
+            batch["surface_cp"],
+            loss_type=self.config.surface_loss_type,
+            mask=batch["surface_mask"],
+            weight=self._surface_region_weights(batch=batch),
+        )
 
     def _surface_pressure_loss(self, model: BaseOperatorModel, batch: dict[str, Any]) -> torch.Tensor:
         if not self.config.use_surface_pressure_loss or self.config.surface_pressure_weight <= 0.0:
@@ -175,6 +238,7 @@ class CompositeLoss:
             batch["surface_pressure"],
             loss_type=self.config.surface_loss_type,
             mask=batch["surface_pressure_available"] * batch["surface_mask"],
+            weight=self._surface_region_weights(batch=batch),
         )
 
     def _surface_cp_prediction(self, surface_fields: torch.Tensor, batch: dict[str, Any]) -> torch.Tensor:
@@ -210,6 +274,7 @@ class CompositeLoss:
             batch["surface_heat_flux"],
             loss_type="mse",
             mask=batch["surface_heat_flux_available"] * batch["surface_mask"],
+            weight=self._surface_region_weights(batch=batch),
         )
 
     def _surface_wall_shear_loss(self, model: BaseOperatorModel, batch: dict[str, Any]) -> torch.Tensor:
@@ -227,6 +292,7 @@ class CompositeLoss:
             batch["surface_wall_shear"],
             loss_type="mse",
             mask=batch["surface_wall_shear_available"] * batch["surface_mask"],
+            weight=self._surface_region_weights(batch=batch),
         )
 
     def _slice_loss(self, model: BaseOperatorModel, batch: dict[str, Any]) -> torch.Tensor:
@@ -238,6 +304,7 @@ class CompositeLoss:
             batch["slice_fields"],
             loss_type=self.config.field_loss_type,
             mask=batch["slice_available"] * batch["slice_mask"],
+            weight=self._slice_region_weights(batch=batch),
         )
 
     def _feature_loss(self, batch: dict[str, Any], outputs: dict[str, torch.Tensor]) -> torch.Tensor:
@@ -247,10 +314,33 @@ class CompositeLoss:
             return batch["field_targets"].new_zeros(())
         feature_target = torch.cat([batch["pressure_gradient_indicator"], batch["high_gradient_mask"]], dim=-1)
         if self.config.feature_loss_type == "bce":
-            feature_loss = F.binary_cross_entropy_with_logits(outputs["features"], feature_target, reduction="none")
+            pos_weight = None
+            if self.config.use_feature_class_balancing:
+                positive_fraction = feature_target.mean(dim=(0, 1))
+                negative_fraction = 1.0 - positive_fraction
+                dynamic_pos_weight = negative_fraction / positive_fraction.clamp_min(1.0e-4)
+                if self.config.feature_positive_weight > 1.0:
+                    pos_weight = torch.full_like(dynamic_pos_weight, self.config.feature_positive_weight)
+                else:
+                    pos_weight = dynamic_pos_weight.clamp(1.0, self.config.feature_max_positive_weight)
+            feature_loss = F.binary_cross_entropy_with_logits(
+                outputs["features"],
+                feature_target,
+                reduction="none",
+                pos_weight=pos_weight,
+            )
+            if self.config.feature_focal_gamma > 0.0:
+                probs = torch.sigmoid(outputs["features"])
+                pt = probs * feature_target + (1.0 - probs) * (1.0 - feature_target)
+                feature_loss = feature_loss * ((1.0 - pt).clamp_min(1.0e-6) ** self.config.feature_focal_gamma)
         else:
             feature_loss = (outputs["features"] - feature_target) ** 2
-        return masked_reduce(feature_loss, mask=batch["feature_available"] * batch["query_mask"], reduction="mean")
+        return masked_reduce(
+            feature_loss,
+            mask=batch["feature_available"] * batch["query_mask"],
+            reduction="mean",
+            weight=self._query_region_weights(batch=batch),
+        )
 
     def _shock_location_loss(self, batch: dict[str, Any], outputs: dict[str, torch.Tensor]) -> torch.Tensor:
         if not self.config.use_shock_location_loss or self.config.shock_location_weight <= 0.0:
@@ -264,54 +354,54 @@ class CompositeLoss:
         loss = (centroid - batch["shock_location"]) ** 2
         return masked_reduce(loss, mask=batch["shock_location_available"], reduction="mean")
 
-    def _physics_loss(self, model: BaseOperatorModel, batch: dict[str, Any]) -> torch.Tensor:
-        if len(self.field_names) < 4:
-            return batch["field_targets"].new_zeros(())
-        coords = batch["query_points"].detach().clone().requires_grad_(True)
-        physics_outputs = model.loss_outputs(batch["branch_inputs"], coords)
-        fields = self.normalizers.fields.inverse_transform_tensor(physics_outputs["fields"])
-        coord_scale = self.normalizers.coordinates.gradient_scale_tensor(device=coords.device, dtype=coords.dtype)
-        if self.field_names[3] == "rho":
-            residuals = compressible_euler_residuals(
-                predicted_fields=fields,
-                coords=coords,
-                coord_scale=coord_scale,
-                include_energy=self.config.use_energy_residual,
-            )
-        elif self.field_names[3] == "nut":
-            residuals = incompressible_rans_proxy_residuals(
-                predicted_fields=fields,
-                coords=coords,
-                coord_scale=coord_scale,
-            )
-        else:
-            return batch["field_targets"].new_zeros(())
-        losses = []
-        for residual in residuals.values():
-            losses.append(masked_reduce(residual**2, mask=batch["query_mask"], reduction="mean"))
-        return torch.stack(losses).mean()
-
-    def _boundary_loss(
-        self,
-        model: BaseOperatorModel,
-        batch: dict[str, Any],
-        outputs: dict[str, torch.Tensor],
-    ) -> torch.Tensor:
-        if self.config.boundary_weight <= 0.0:
-            return outputs["fields"].new_zeros(())
-        query_fields = self.normalizers.fields.inverse_transform_tensor(outputs["fields"])
-        farfield_targets = batch["farfield_targets"].unsqueeze(1).expand_as(query_fields)
-        farfield_loss = regression_loss(
-            query_fields,
-            farfield_targets,
-            loss_type="mse",
-            mask=batch["farfield_mask"] * batch["query_mask"],
+    def _query_region_weights(self, batch: dict[str, Any]) -> torch.Tensor:
+        query_mask = batch["query_mask"]
+        weights = torch.ones_like(query_mask)
+        if not self.config.use_hard_region_weighting:
+            return weights
+        masks = query_region_masks_torch(
+            batch["query_points_raw"],
+            batch["surface_points_raw"],
+            surface_mask=batch.get("surface_mask"),
+            high_gradient_mask=batch.get("high_gradient_mask"),
+            near_wall_distance_fraction=self.config.near_wall_distance_fraction,
+            wake_halfwidth_fraction=self.config.wake_halfwidth_fraction,
         )
+        if self.config.high_gradient_region_weight > 0.0:
+            weights = weights + self.config.high_gradient_region_weight * masks["high_gradient"]
+        if self.config.near_wall_region_weight > 0.0:
+            weights = weights + self.config.near_wall_region_weight * masks["near_wall"]
+        if self.config.wake_region_weight > 0.0:
+            weights = weights + self.config.wake_region_weight * masks["wake"]
+        return weights
 
-        surface_outputs = model.loss_outputs(batch["branch_inputs"], batch["surface_points"])
-        surface_fields = self.normalizers.fields.inverse_transform_tensor(surface_outputs["fields"])
-        velocity = surface_fields[..., :2]
-        surface_normals = batch["surface_normals"]
-        normal_velocity = (velocity * surface_normals).sum(dim=-1)
-        wall_loss = masked_reduce(normal_velocity**2, mask=batch["surface_mask"], reduction="mean")
-        return 0.5 * (farfield_loss + wall_loss)
+    def _slice_region_weights(self, batch: dict[str, Any]) -> torch.Tensor:
+        slice_mask = batch["slice_mask"]
+        weights = torch.ones_like(slice_mask)
+        if not self.config.use_hard_region_weighting or batch["slice_points_raw"].shape[1] == 0:
+            return weights
+        masks = query_region_masks_torch(
+            batch["slice_points_raw"],
+            batch["surface_points_raw"],
+            surface_mask=batch.get("surface_mask"),
+            high_gradient_mask=None,
+            near_wall_distance_fraction=self.config.near_wall_distance_fraction,
+            wake_halfwidth_fraction=self.config.wake_halfwidth_fraction,
+        )
+        if self.config.near_wall_region_weight > 0.0:
+            weights = weights + self.config.near_wall_region_weight * masks["near_wall"]
+        if self.config.wake_region_weight > 0.0:
+            weights = weights + self.config.wake_region_weight * masks["wake"]
+        return weights
+
+    def _surface_region_weights(self, batch: dict[str, Any]) -> torch.Tensor:
+        surface_mask = batch["surface_mask"]
+        weights = torch.ones_like(surface_mask)
+        if not self.config.use_hard_region_weighting or self.config.surface_leading_edge_weight <= 0.0:
+            return weights
+        masks = surface_region_masks_torch(
+            batch["surface_points_raw"],
+            surface_mask=batch.get("surface_mask"),
+            leading_edge_fraction=self.config.leading_edge_fraction,
+        )
+        return weights + self.config.surface_leading_edge_weight * masks["leading_edge"]

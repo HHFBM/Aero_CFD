@@ -14,6 +14,7 @@ from cfd_operator.config.schemas import ProjectConfig
 from cfd_operator.data.module import NormalizerBundle
 from cfd_operator.geometry import (
     BranchInputAdapter,
+    BranchInputContract,
     GeometryInputError,
     NACA4Airfoil,
     resolve_geometry_input,
@@ -21,6 +22,7 @@ from cfd_operator.geometry import (
 from cfd_operator.geometry.preprocess import CanonicalGeometry2D, maybe_warn_geometry_adapter
 from cfd_operator.geometry.semantics import build_inference_geometry_semantics
 from cfd_operator.models import create_model
+from cfd_operator.models.geometry_backbone import GeometryBackboneContract, build_geometry_backbone_contract
 from cfd_operator.output_semantics import build_output_semantics, default_scalar_names
 from cfd_operator.postprocess import (
     build_slice_points,
@@ -49,6 +51,8 @@ class Predictor:
     normalizers: NormalizerBundle
     model: torch.nn.Module
     dataset_capability: DatasetCapability | None = None
+    branch_contract: BranchInputContract | None = None
+    geometry_backbone_contract: GeometryBackboneContract | None = None
     device: str = "cpu"
 
     @classmethod
@@ -63,11 +67,21 @@ class Predictor:
         dataset_capability = None
         if checkpoint.get("dataset_capability") is not None:
             dataset_capability = DatasetCapability.from_dict(checkpoint["dataset_capability"])
+        branch_contract = None
+        if checkpoint.get("branch_contract") is not None:
+            branch_contract = BranchInputContract.from_dict(checkpoint["branch_contract"])
+        geometry_backbone_contract = None
+        if checkpoint.get("geometry_backbone_contract") is not None:
+            geometry_backbone_contract = GeometryBackboneContract.from_dict(checkpoint["geometry_backbone_contract"])
+        else:
+            geometry_backbone_contract = build_geometry_backbone_contract(config.model)
         return cls(
             config=config,
             normalizers=normalizers,
             model=model,
             dataset_capability=dataset_capability,
+            branch_contract=branch_contract,
+            geometry_backbone_contract=geometry_backbone_contract,
             device=device,
         )
 
@@ -141,6 +155,10 @@ class Predictor:
                 },
                 "dataset_capability": (
                     self.dataset_capability.as_dict() if self.dataset_capability is not None else None
+                ),
+                "branch_contract": self.branch_contract.as_dict() if self.branch_contract is not None else None,
+                "geometry_backbone_contract": (
+                    self.geometry_backbone_contract.as_dict() if self.geometry_backbone_contract is not None else None
                 ),
             },
         }
@@ -253,11 +271,25 @@ class Predictor:
         """
 
         expected_dim = int(self.normalizers.branch.mean.shape[0])
-        adapter = BranchInputAdapter(
+        contract = self.branch_contract or BranchInputContract(
             branch_input_mode=self.config.data.branch_input_mode,
             branch_feature_mode=self.config.data.branch_feature_mode,
-            signature_points=self.config.data.num_surface_points,
+            branch_input_dim=expected_dim,
+            geometry_representation=canonical_geometry.geometry_representation,
+            branch_encoding_type=(
+                "encoded_geometry_compatible_features"
+                if self.config.data.branch_input_mode == "encoded_geometry"
+                else canonical_geometry.branch_encoding_type
+            ),
+            include_reynolds=self.config.data.include_reynolds,
+            num_surface_points=self.config.data.num_surface_points,
             encoded_geometry_latent_dim=self.config.data.encoded_geometry_latent_dim,
+        )
+        adapter = BranchInputAdapter(
+            branch_input_mode=contract.branch_input_mode,
+            branch_feature_mode=contract.branch_feature_mode,
+            signature_points=contract.num_surface_points,
+            encoded_geometry_latent_dim=contract.encoded_geometry_latent_dim,
         )
         try:
             branch_inputs = adapter.build_for_checkpoint(
@@ -265,24 +297,27 @@ class Predictor:
                 mach=mach,
                 aoa_deg=aoa_deg,
                 reynolds=reynolds,
-                expected_dim=expected_dim,
-                include_reynolds=self.config.data.include_reynolds,
+                contract=contract,
             )
         except ValueError as exc:
             raise ValueError(
                 "Could not build branch_inputs for this checkpoint from the provided geometry input. "
-                "This usually means the checkpoint expects a legacy branch encoding that cannot be safely reconstructed "
-                "from the selected geometry_mode. Try legacy_naca_params for NACA-style checkpoints, or use a "
-                "surface-signature-compatible checkpoint for generic_surface_points inputs."
+                f"expected_branch_dim={expected_dim}, "
+                f"branch_input_mode={contract.branch_input_mode}, "
+                f"branch_feature_mode={contract.branch_feature_mode}, "
+                f"geometry_representation={contract.geometry_representation}, "
+                f"branch_encoding_type={contract.branch_encoding_type}. "
+                "This usually means the checkpoint expects a branch contract that cannot be safely reconstructed "
+                "from the selected geometry input. Provide compatible geometry_params or surface_points."
             ) from exc
 
-        if self.config.data.branch_input_mode == "encoded_geometry":
+        if contract.branch_input_mode == "encoded_geometry":
             if canonical_geometry.adapter_note:
                 maybe_warn_geometry_adapter(canonical_geometry.adapter_note)
             return branch_inputs, build_inference_geometry_semantics(
                 geometry_mode=canonical_geometry.geometry_mode,
-                geometry_representation=canonical_geometry.geometry_params_semantics,
-                branch_encoding_type="encoded_geometry_compatible_features",
+                geometry_representation=contract.geometry_representation,
+                branch_encoding_type=contract.branch_encoding_type,
                 geometry_reconstructability=canonical_geometry.reconstructability,
                 geometry_params_semantics=canonical_geometry.geometry_params_semantics,
                 legacy_param_source="encoded_geometry_adapter",
@@ -310,7 +345,7 @@ class Predictor:
         return branch_inputs, build_inference_geometry_semantics(
             geometry_mode=canonical_geometry.geometry_mode,
             geometry_representation=representation,
-            branch_encoding_type="legacy_fixed_features",
+            branch_encoding_type=contract.branch_encoding_type,
             geometry_reconstructability=canonical_geometry.reconstructability,
             geometry_params_semantics=canonical_geometry.geometry_params_semantics,
             legacy_param_source="naca4_parameter_vector" if canonical_geometry.airfoil is not None else "geometry_adapter",

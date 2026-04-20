@@ -12,7 +12,7 @@ from torch.utils.data import DataLoader
 from cfd_operator.config.schemas import DataConfig
 from cfd_operator.data.adapters import AdapterResult, build_adapter
 from cfd_operator.data.collate import cfd_collate_fn
-from cfd_operator.data.dataset import CFDOperatorDataset
+from cfd_operator.data.dataset import CFDOperatorDataset, SchemaBackedCFDOperatorDataset
 from cfd_operator.data.normalization import StandardNormalizer
 from cfd_operator.data.airfrans import AirfRANSDatasetConverter
 from cfd_operator.data.airfrans_original import AirfRANSOriginalDatasetConverter
@@ -118,6 +118,8 @@ class CFDDataModule:
             self.datasets[split_name] = self._make_dataset(np.asarray(split_indices))
 
     def _fit_normalizers(self, train_indices: np.ndarray) -> NormalizerBundle:
+        if self.config.dataset_view_mode == "schema":
+            return self._fit_normalizers_from_samples(train_indices)
         assert self.payload is not None
         branch_values = self.payload["branch_inputs"][train_indices]
         query_points = self.payload["query_points"][train_indices].reshape(-1, self.payload["query_points"].shape[-1])
@@ -131,9 +133,66 @@ class CFDDataModule:
             scalars=StandardNormalizer.fit(scalar_values),
         )
 
-    def _make_dataset(self, indices: np.ndarray) -> CFDOperatorDataset:
+    def _fit_normalizers_from_samples(self, train_indices: np.ndarray) -> NormalizerBundle:
+        if not self.unified_samples:
+            raise ValueError("Schema-backed normalizer fitting requires unified_samples.")
+        train_samples = [self.unified_samples[int(index)] for index in train_indices]
+        branch_values = np.stack(
+            [
+                np.asarray(sample.geometry.geometry_features["branch_inputs"], dtype=np.float32).reshape(-1)
+                for sample in train_samples
+            ],
+            axis=0,
+        )
+        query_points = np.concatenate(
+            [
+                np.asarray(sample.query_sets["field_query_points"].points, dtype=np.float32)
+                for sample in train_samples
+            ],
+            axis=0,
+        )
+        field_values = np.concatenate(
+            [
+                np.asarray(sample.targets.field_targets, dtype=np.float32)
+                for sample in train_samples
+                if sample.targets.field_targets is not None
+            ],
+            axis=0,
+        )
+        scalar_values = np.stack(
+            [
+                np.asarray(
+                    [
+                        float(sample.targets.scalar_targets.get("cl", 0.0)),
+                        float(sample.targets.scalar_targets.get("cd", 0.0)),
+                    ],
+                    dtype=np.float32,
+                )
+                for sample in train_samples
+            ],
+            axis=0,
+        )
+        return NormalizerBundle(
+            branch=StandardNormalizer.fit(branch_values),
+            coordinates=StandardNormalizer.fit(query_points),
+            fields=StandardNormalizer.fit(field_values),
+            scalars=StandardNormalizer.fit(scalar_values),
+        )
+
+    def _make_dataset(self, indices: np.ndarray) -> CFDOperatorDataset | SchemaBackedCFDOperatorDataset:
         assert self.payload is not None
         assert self.normalizers is not None
+        if self.config.dataset_view_mode == "schema":
+            return SchemaBackedCFDOperatorDataset(
+                samples=self.unified_samples,
+                indices=indices,
+                branch_normalizer=self.normalizers.branch,
+                coordinate_normalizer=self.normalizers.coordinates,
+                field_normalizer=self.normalizers.fields,
+                scalar_normalizer=self.normalizers.scalars,
+                field_names=list(self.config.field_names),
+                include_reynolds=self.config.include_reynolds,
+            )
         return CFDOperatorDataset(
             payload=self.payload,
             indices=indices,
@@ -171,6 +230,15 @@ class CFDDataModule:
         return sorted(self.datasets.keys())
 
     def _discover_splits(self) -> dict[str, np.ndarray]:
+        if self.config.dataset_view_mode == "schema" and self.unified_samples:
+            split_mapping: dict[str, list[int]] = {}
+            for index, sample in enumerate(self.unified_samples):
+                split_name = sample.metadata.split
+                if split_name is None:
+                    continue
+                split_mapping.setdefault(split_name, []).append(index)
+            if split_mapping:
+                return {key: np.asarray(value, dtype=np.int64) for key, value in split_mapping.items()}
         assert self.payload is not None
         split_mapping: dict[str, np.ndarray] = {}
         for key, value in self.payload.items():

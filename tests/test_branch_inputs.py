@@ -6,7 +6,7 @@ import torch
 
 from cfd_operator.config.schemas import DataConfig, ModelConfig
 from cfd_operator.data import CFDDataModule
-from cfd_operator.geometry import BranchInputAdapter, GeometryFeatureBuilder, NACA4Airfoil
+from cfd_operator.geometry import BranchInputAdapter, BranchInputContract, GeometryFeatureBuilder, NACA4Airfoil
 from cfd_operator.models import create_model
 
 
@@ -107,3 +107,18 @@ def test_default_config_keeps_legacy_branch_mode(tmp_path) -> None:
     data_module.setup()
     batch = next(iter(data_module.train_dataloader()))
     assert batch["branch_input_mode"][0] == "legacy_fixed_features"
+
+
+def test_branch_contract_roundtrip() -> None:
+    contract = BranchInputContract(
+        branch_input_mode="legacy_fixed_features",
+        branch_feature_mode="params",
+        branch_input_dim=6,
+        geometry_representation="parameterized_geometry",
+        branch_encoding_type="naca_parameter_vector_plus_flow",
+        include_reynolds=False,
+        num_surface_points=32,
+        encoded_geometry_latent_dim=16,
+    )
+    restored = BranchInputContract.from_dict(contract.as_dict())
+    assert restored == contract

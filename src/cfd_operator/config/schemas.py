@@ -34,6 +34,14 @@ class NormalizationConfig(BaseModel):
 class DataConfig(BaseModel):
     name: str = "toy_airfoil"
     dataset_type: Literal["synthetic", "file", "airfrans", "airfrans_original"] = "synthetic"
+    dataset_view_mode: Literal["payload", "schema"] = Field(
+        default="payload",
+        description=(
+            "Controls how the datamodule builds dataset samples. "
+            "'payload' keeps the legacy dense payload-backed path. "
+            "'schema' builds training views from unified CFDSurrogateSample objects."
+        ),
+    )
     dataset_path: str = "outputs/data/toy_airfoil_dataset.npz"
     airfrans_root: str = "outputs/data/airfrans_raw"
     airfrans_archive_path: str = "outputs/data/AirfRANS_original.tar"
@@ -130,6 +138,51 @@ class ModelConfig(BaseModel):
     use_fourier_features: bool = True
     fourier_features_dim: int = 32
     scalar_head_hidden_dim: int = 64
+    scalar_pooling_mode: Literal["default", "branch_only", "mean", "mean_max_residual"] = "default"
+    geometry_backbone_mode: Literal["fixed_branch_vector", "native_geometry_latent_reserved"] = Field(
+        default="fixed_branch_vector",
+        description=(
+            "Controls the geometry conditioning contract seen by the backbone. "
+            "'fixed_branch_vector' keeps the current stable path. "
+            "'native_geometry_latent_reserved' only reserves metadata/interface slots for a future native variable-length geometry backbone."
+        ),
+    )
+    geometry_backbone_type: Literal["none", "reserved_interface"] = Field(
+        default="none",
+        description=(
+            "Type tag for the geometry backbone. 'none' means the current fixed branch-vector path. "
+            "'reserved_interface' means the checkpoint/config explicitly reserves a future native geometry backbone interface without making it active in the main training path."
+        ),
+    )
+    native_geometry_latent_dim: int = Field(
+        default=128,
+        description="Reserved latent size for a future native geometry backbone. Not active in the default branch-vector path.",
+    )
+    native_geometry_token_dim: int = Field(
+        default=64,
+        description="Reserved token feature size for a future native geometry backbone. Not active in the default branch-vector path.",
+    )
+    native_geometry_max_tokens: int = Field(
+        default=128,
+        description="Reserved token budget for a future native geometry backbone. Not active in the default branch-vector path.",
+    )
+
+    @model_validator(mode="after")
+    def validate_geometry_backbone(self) -> "ModelConfig":
+        if self.native_geometry_latent_dim <= 0:
+            raise ValueError("native_geometry_latent_dim must be positive.")
+        if self.native_geometry_token_dim <= 0:
+            raise ValueError("native_geometry_token_dim must be positive.")
+        if self.native_geometry_max_tokens <= 0:
+            raise ValueError("native_geometry_max_tokens must be positive.")
+        if self.geometry_backbone_mode == "fixed_branch_vector" and self.geometry_backbone_type == "reserved_interface":
+            # Keep this combination legal for explicit metadata reservation while making the current path remain active.
+            return self
+        if self.geometry_backbone_mode == "native_geometry_latent_reserved" and self.geometry_backbone_type == "none":
+            raise ValueError(
+                "geometry_backbone_mode='native_geometry_latent_reserved' requires geometry_backbone_type='reserved_interface'."
+            )
+        return self
 
 
 class SchedulerConfig(BaseModel):
@@ -167,6 +220,13 @@ class LossConfig(BaseModel):
     shock_location_weight: float = Field(default=0.0, description="Weight for experimental shock-location loss.")
     physics_weight: float = Field(default=0.1, description="Weight for physics regularization loss.")
     boundary_weight: float = Field(default=0.05, description="Weight for boundary consistency loss.")
+    consistency_weight: float = Field(default=0.0, description="Weight for derived consistency loss family.")
+    lambda_data: float = Field(default=1.0, description="Inner-family weight for supervised data terms in the unified physics-loss API.")
+    lambda_continuity: float = Field(default=1.0, description="Inner-family weight for continuity residual loss.")
+    lambda_momentum: float = Field(default=1.0, description="Inner-family weight for momentum residual loss.")
+    lambda_nut: float = Field(default=1.0, description="Inner-family weight for nut transport/smoothness proxy residuals.")
+    lambda_bc: float = Field(default=1.0, description="Inner-family weight for boundary condition loss terms.")
+    lambda_consistency: float = Field(default=1.0, description="Inner-family weight for derived consistency loss terms.")
     field_loss_type: Literal["mse", "mae"] = "mse"
     scalar_loss_type: Literal["mse", "mae"] = "mse"
     surface_loss_type: Literal["mse", "mae"] = "mse"
@@ -179,6 +239,66 @@ class LossConfig(BaseModel):
     use_shock_location_loss: bool = False
     use_physics: bool = True
     use_energy_residual: bool = False
+    physics_warmup_epochs: int = Field(
+        default=0,
+        description="Number of epochs to keep PDE/BC/consistency families off before ramping them in.",
+    )
+    physics_ramp_epochs: int = Field(
+        default=0,
+        description="Linear ramp duration for physics-family weights after warmup.",
+    )
+    physics_schedule_max_weight: float = Field(
+        default=1.0,
+        description="Maximum multiplier applied by the physics-family scheduler after warmup/ramp.",
+    )
+    use_hard_region_weighting: bool = Field(
+        default=False,
+        description="Enable additional weighting for high-gradient, near-wall, wake, and leading-edge regions.",
+    )
+    high_gradient_region_weight: float = Field(
+        default=0.0,
+        description="Extra weight added on high-gradient query regions for field/feature supervision.",
+    )
+    near_wall_region_weight: float = Field(
+        default=0.0,
+        description="Extra weight added on near-wall query and slice regions.",
+    )
+    wake_region_weight: float = Field(
+        default=0.0,
+        description="Extra weight added on wake-region query and slice regions.",
+    )
+    surface_leading_edge_weight: float = Field(
+        default=0.0,
+        description="Extra weight added on leading-edge surface regions for surface losses.",
+    )
+    near_wall_distance_fraction: float = Field(
+        default=0.08,
+        description="Near-wall distance threshold as a fraction of chord.",
+    )
+    wake_halfwidth_fraction: float = Field(
+        default=0.15,
+        description="Wake half-width as a fraction of chord when constructing wake masks.",
+    )
+    leading_edge_fraction: float = Field(
+        default=0.15,
+        description="Leading-edge region width as a fraction of chord for surface weighting.",
+    )
+    use_feature_class_balancing: bool = Field(
+        default=False,
+        description="Enable positive-class reweighting for BCE-style feature supervision.",
+    )
+    feature_positive_weight: float = Field(
+        default=1.0,
+        description="Static positive-class weight for feature BCE. Values <= 1 fall back to dynamic class balancing when enabled.",
+    )
+    feature_max_positive_weight: float = Field(
+        default=10.0,
+        description="Upper bound for dynamic feature positive-class weighting.",
+    )
+    feature_focal_gamma: float = Field(
+        default=0.0,
+        description="Optional focal-style gamma applied to feature BCE loss.",
+    )
 
     @model_validator(mode="after")
     def validate_loss_flags(self) -> "LossConfig":
@@ -194,6 +314,48 @@ class LossConfig(BaseModel):
         for flag_name, enabled, weight_name, weight in weighted_flags:
             if enabled and weight <= 0.0:
                 raise ValueError(f"{flag_name}=true requires {weight_name} > 0.")
+        if self.use_hard_region_weighting:
+            region_weights = (
+                self.high_gradient_region_weight,
+                self.near_wall_region_weight,
+                self.wake_region_weight,
+                self.surface_leading_edge_weight,
+            )
+            if max(region_weights) <= 0.0:
+                raise ValueError(
+                    "use_hard_region_weighting=true requires at least one of "
+                    "high_gradient_region_weight, near_wall_region_weight, wake_region_weight, "
+                    "or surface_leading_edge_weight to be > 0."
+                )
+        for name, value in [
+            ("near_wall_distance_fraction", self.near_wall_distance_fraction),
+            ("wake_halfwidth_fraction", self.wake_halfwidth_fraction),
+            ("leading_edge_fraction", self.leading_edge_fraction),
+        ]:
+            if value <= 0.0:
+                raise ValueError(f"{name} must be > 0.")
+        if self.feature_positive_weight <= 0.0:
+            raise ValueError("feature_positive_weight must be > 0.")
+        if self.feature_max_positive_weight <= 0.0:
+            raise ValueError("feature_max_positive_weight must be > 0.")
+        if self.feature_focal_gamma < 0.0:
+            raise ValueError("feature_focal_gamma must be >= 0.")
+        for name, value in [
+            ("consistency_weight", self.consistency_weight),
+            ("lambda_data", self.lambda_data),
+            ("lambda_continuity", self.lambda_continuity),
+            ("lambda_momentum", self.lambda_momentum),
+            ("lambda_nut", self.lambda_nut),
+            ("lambda_bc", self.lambda_bc),
+            ("lambda_consistency", self.lambda_consistency),
+            ("physics_schedule_max_weight", self.physics_schedule_max_weight),
+        ]:
+            if value < 0.0:
+                raise ValueError(f"{name} must be >= 0.")
+        if self.physics_warmup_epochs < 0:
+            raise ValueError("physics_warmup_epochs must be >= 0.")
+        if self.physics_ramp_epochs < 0:
+            raise ValueError("physics_ramp_epochs must be >= 0.")
         return self
 
 

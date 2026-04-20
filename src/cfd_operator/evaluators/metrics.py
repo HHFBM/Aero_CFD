@@ -109,3 +109,22 @@ def compute_feature_metrics(
         "pressure_gradient_pred_fraction": float(np.mean(pressure_gradient_pred >= 0.5)),
         "high_gradient_pred_fraction": float(np.mean(high_pred >= 0.5)),
     }
+
+
+def compute_masked_region_metrics(
+    y_true: np.ndarray,
+    y_pred: np.ndarray,
+    mask: np.ndarray,
+    *,
+    prefix: str,
+) -> dict[str, float]:
+    region_mask = np.asarray(mask).reshape(-1) >= 0.5
+    if not np.any(region_mask):
+        return {}
+    true_values = np.asarray(y_true)[region_mask]
+    pred_values = np.asarray(y_pred)[region_mask]
+    return {
+        f"{prefix}_rmse": rmse(true_values, pred_values),
+        f"{prefix}_relative_error": relative_error(true_values, pred_values),
+        f"{prefix}_fraction": float(np.mean(region_mask)),
+    }

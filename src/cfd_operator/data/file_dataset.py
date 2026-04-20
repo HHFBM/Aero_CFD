@@ -98,6 +98,18 @@ def _parse_geometry_params(frame: pd.DataFrame) -> np.ndarray:
     return np.zeros((4,), dtype=np.float32)
 
 
+def _sample_scalar_targets(frame: pd.DataFrame) -> tuple[np.ndarray, np.ndarray]:
+    values = np.zeros((2,), dtype=np.float32)
+    available = np.zeros((2,), dtype=np.float32)
+    if "cl" in frame.columns:
+        values[0] = float(frame["cl"].iloc[0])
+        available[0] = 1.0
+    if "cd" in frame.columns:
+        values[1] = float(frame["cd"].iloc[0])
+        available[1] = 1.0
+    return values, available
+
+
 def _infer_geometry_payload(
     frame: pd.DataFrame,
     config: DataConfig | None,
@@ -200,13 +212,6 @@ def _group_tabular_records(table: pd.DataFrame, config: DataConfig | None = None
         "u",
         "v",
         "p",
-        "surface_flag",
-        "cp",
-        "cl",
-        "cd",
-        "fidelity_level",
-        "source",
-        "convergence_flag",
     }
     missing_columns = required_columns.difference(table.columns)
     if missing_columns:
@@ -232,18 +237,32 @@ def _group_tabular_records(table: pd.DataFrame, config: DataConfig | None = None
             auxiliary_values = frame[field_name_candidates[3]].to_numpy(dtype=np.float32)
 
         geometry_params, branch_inputs, geometry_points, geometry_mode, geometry_representation, geometry_params_semantics, branch_encoding_type, geometry_reconstructability = _infer_geometry_payload(frame, config=config)
-        surface_points = frame.loc[frame["surface_flag"] == 1, ["x", "y"]].to_numpy(dtype=np.float32)
+        surface_mask = (
+            frame["surface_flag"].to_numpy(dtype=np.float32) > 0.5
+            if "surface_flag" in frame.columns
+            else np.zeros((frame.shape[0],), dtype=bool)
+        )
+        surface_points = frame.loc[surface_mask, ["x", "y"]].to_numpy(dtype=np.float32)
+        if surface_points.shape[0] == 0 and geometry_points.shape[0] > 0:
+            surface_points = geometry_points
         surface_count = surface_points.shape[0]
         surface_normals = _estimate_surface_normals(surface_points)
         query_points = frame[["x", "y"]].to_numpy(dtype=np.float32)
         query_count = query_points.shape[0]
         farfield_mask = _build_farfield_mask(query_points)
+        scalar_targets, scalar_targets_available = _sample_scalar_targets(frame)
+        if "cp" in frame.columns and np.any(surface_mask):
+            surface_cp = frame.loc[surface_mask, ["cp"]].to_numpy(dtype=np.float32)
+            surface_cp_available = np.ones((surface_count,), dtype=np.float32)
+        else:
+            surface_cp = np.zeros((surface_count, 1), dtype=np.float32)
+            surface_cp_available = np.zeros((surface_count,), dtype=np.float32)
         samples.append(
             {
                 "airfoil_id": str(sample_id),
                 "geometry_params": geometry_params,
                 "geometry_mode": geometry_mode,
-                "geometry_source": str(frame["source"].iloc[0]),
+                "geometry_source": str(frame["source"].iloc[0]) if "source" in frame.columns else "generic_tabular",
                 "geometry_representation": geometry_representation,
                 "branch_encoding_type": (
                     f"geometry_preprocessed_{config.branch_feature_mode}"
@@ -286,7 +305,7 @@ def _group_tabular_records(table: pd.DataFrame, config: DataConfig | None = None
                 "surface_normals": surface_normals,
                 "surface_arc_length": np.zeros((surface_count, 1), dtype=np.float32),
                 "cp_reference": np.asarray([0.0, 1.0], dtype=np.float32),
-                "surface_cp": frame.loc[frame["surface_flag"] == 1, ["cp"]].to_numpy(dtype=np.float32),
+                "surface_cp": surface_cp,
                 "surface_pressure": np.zeros((surface_count, 1), dtype=np.float32),
                 "surface_velocity": np.zeros((surface_count, 2), dtype=np.float32),
                 "surface_nut": np.zeros((surface_count, 1), dtype=np.float32),
@@ -298,6 +317,7 @@ def _group_tabular_records(table: pd.DataFrame, config: DataConfig | None = None
                 "shock_indicator": np.zeros((query_count, 1), dtype=np.float32),
                 "high_gradient_mask": np.zeros((query_count, 1), dtype=np.float32),
                 "shock_location": np.asarray([np.nan, np.nan], dtype=np.float32),
+                "surface_cp_available": surface_cp_available,
                 "surface_pressure_available": np.zeros((surface_count,), dtype=np.float32),
                 "surface_velocity_available": np.zeros((surface_count,), dtype=np.float32),
                 "surface_nut_available": np.zeros((surface_count,), dtype=np.float32),
@@ -307,12 +327,13 @@ def _group_tabular_records(table: pd.DataFrame, config: DataConfig | None = None
                 "feature_available": np.zeros((query_count,), dtype=np.float32),
                 "nut_available": np.zeros((query_count,), dtype=np.float32),
                 "shock_location_available": np.asarray([0.0], dtype=np.float32),
-                "scalar_targets": frame[["cl", "cd"]].iloc[0].to_numpy(dtype=np.float32),
+                "scalar_targets": scalar_targets,
+                "scalar_targets_available": scalar_targets_available,
                 "scalar_component_targets": np.zeros((5,), dtype=np.float32),
                 "scalar_component_available": np.zeros((5,), dtype=np.float32),
-                "fidelity_level": int(frame["fidelity_level"].iloc[0]),
-                "source": str(frame["source"].iloc[0]),
-                "convergence_flag": int(frame["convergence_flag"].iloc[0]),
+                "fidelity_level": int(frame["fidelity_level"].iloc[0]) if "fidelity_level" in frame.columns else 0,
+                "source": str(frame["source"].iloc[0]) if "source" in frame.columns else "generic_tabular",
+                "convergence_flag": int(frame["convergence_flag"].iloc[0]) if "convergence_flag" in frame.columns else 1,
             }
         )
 
@@ -344,6 +365,7 @@ def _group_tabular_records(table: pd.DataFrame, config: DataConfig | None = None
         "surface_arc_length": np.stack([sample["surface_arc_length"] for sample in samples]).reshape(len(samples), surface_count, 1),
         "cp_reference": np.stack([sample["cp_reference"] for sample in samples]),
         "surface_cp": np.stack([sample["surface_cp"] for sample in samples]).reshape(len(samples), surface_count, 1),
+        "surface_cp_available": np.stack([sample["surface_cp_available"] for sample in samples]).reshape(len(samples), surface_count),
         "surface_pressure": np.stack([sample["surface_pressure"] for sample in samples]).reshape(len(samples), surface_count, 1),
         "surface_velocity": np.stack([sample["surface_velocity"] for sample in samples]).reshape(len(samples), surface_count, 2),
         "surface_nut": np.stack([sample["surface_nut"] for sample in samples]).reshape(len(samples), surface_count, 1),
@@ -365,6 +387,7 @@ def _group_tabular_records(table: pd.DataFrame, config: DataConfig | None = None
         "nut_available": np.stack([sample["nut_available"] for sample in samples]).reshape(len(samples), query_count),
         "shock_location_available": np.stack([sample["shock_location_available"] for sample in samples]).reshape(len(samples), 1),
         "scalar_targets": np.stack([sample["scalar_targets"] for sample in samples]),
+        "scalar_targets_available": np.stack([sample["scalar_targets_available"] for sample in samples]),
         "scalar_component_targets": np.stack([sample["scalar_component_targets"] for sample in samples]),
         "scalar_component_available": np.stack([sample["scalar_component_available"] for sample in samples]),
         "field_names": np.asarray(field_name_candidates),

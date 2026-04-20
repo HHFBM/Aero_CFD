@@ -172,3 +172,56 @@ def plot_loss_curves(history_csv: Union[str, Path], save_path: Union[str, Path])
     ax.legend()
     fig.savefig(save_path, bbox_inches="tight")
     plt.close(fig)
+
+
+def plot_split_metric_bars(
+    metric_values_by_split: dict[str, float],
+    title: str,
+    ylabel: str,
+    save_path: Union[str, Path],
+) -> None:
+    labels = list(metric_values_by_split.keys())
+    values = [float(metric_values_by_split[label]) for label in labels]
+    fig, ax = plt.subplots(figsize=(6, 4))
+    ax.bar(labels, values, color=["tab:blue", "tab:orange", "tab:green"][: len(labels)])
+    ax.set_ylabel(ylabel)
+    ax.set_title(title)
+    fig.savefig(save_path, bbox_inches="tight")
+    plt.close(fig)
+
+
+def plot_gap_bars(
+    gap_values: dict[str, float],
+    title: str,
+    save_path: Union[str, Path],
+) -> None:
+    labels = list(gap_values.keys())
+    values = [float(gap_values[label]) for label in labels]
+    fig, ax = plt.subplots(figsize=(7, 4))
+    ax.bar(labels, values, color="tab:red")
+    ax.axhline(0.0, color="black", linestyle="--", linewidth=1.0)
+    ax.set_ylabel("gap")
+    ax.set_title(title)
+    ax.tick_params(axis="x", rotation=20)
+    fig.savefig(save_path, bbox_inches="tight")
+    plt.close(fig)
+
+
+def plot_multi_experiment_metric_comparison(
+    experiment_names: list[str],
+    test_values: list[float],
+    benchmark_values: list[float],
+    metric_name: str,
+    save_path: Union[str, Path],
+) -> None:
+    positions = np.arange(len(experiment_names))
+    width = 0.35
+    fig, ax = plt.subplots(figsize=(8, 4))
+    ax.bar(positions - width / 2.0, test_values, width=width, label="test", color="tab:blue")
+    ax.bar(positions + width / 2.0, benchmark_values, width=width, label="benchmark_holdout", color="tab:orange")
+    ax.set_xticks(positions, experiment_names, rotation=20)
+    ax.set_ylabel(metric_name)
+    ax.set_title(f"{metric_name}: test vs benchmark_holdout")
+    ax.legend()
+    fig.savefig(save_path, bbox_inches="tight")
+    plt.close(fig)

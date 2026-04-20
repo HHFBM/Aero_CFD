@@ -10,6 +10,7 @@ from torch import nn
 
 from cfd_operator.config.schemas import ModelConfig
 from cfd_operator.models.base import BaseOperatorModel
+from cfd_operator.models.geometry_backbone import build_geometry_backbone_contract
 from cfd_operator.models.heads import FeatureDecoderHead, FieldDecoderHead, ScalarDecoderHead, SurfaceDecoderHead
 
 
@@ -141,6 +142,14 @@ class DeepONetModel(BaseOperatorModel):
             "surface": self.surface_head.metadata(),
             "scalar": self.scalar_head.metadata(),
         }
+        metadata["scalar"]["aggregation"] = (
+            "branch_only"
+            if self.config.scalar_pooling_mode == "default"
+            else self.config.scalar_pooling_mode
+        )
         if self.feature_head is not None:
             metadata["feature"] = self.feature_head.metadata()
         return metadata
+
+    def geometry_backbone_metadata(self) -> dict[str, object] | None:
+        return build_geometry_backbone_contract(self.config).as_dict()

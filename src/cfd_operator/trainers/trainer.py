@@ -15,8 +15,10 @@ from torch.utils.data import DataLoader
 
 from cfd_operator.config.schemas import ProjectConfig
 from cfd_operator.data.module import CFDDataModule
+from cfd_operator.geometry import BranchInputAdapter
 from cfd_operator.losses import CompositeLoss
 from cfd_operator.models.base import BaseOperatorModel
+from cfd_operator.models.geometry_backbone import build_geometry_backbone_contract
 from cfd_operator.tasks import build_task_request_from_loss_config
 from cfd_operator.utils.io import save_json, save_yaml
 from cfd_operator.utils.logging import setup_logger
@@ -93,6 +95,8 @@ class Trainer:
 
         for epoch in range(self.state.epoch, self.config.train.epochs):
             self.state.epoch = epoch
+            if hasattr(self.loss_fn, "set_schedule_context"):
+                self.loss_fn.set_schedule_context(epoch=epoch, global_step=self.state.global_step)
             train_metrics = self._run_epoch(train_loader, training=True)
             val_metrics = self._run_epoch(val_loader, training=False)
 
@@ -129,6 +133,19 @@ class Trainer:
                 val_metrics["loss_scalar"],
                 val_metrics["loss_physics"],
             )
+            if self.config.loss.use_hard_region_weighting or self.config.loss.use_feature_class_balancing:
+                self.logger.info(
+                    (
+                        "epoch=%d hard_region query_w=%.3f surface_w=%.3f slice_w=%.3f "
+                        "feature_class_balancing=%s focal_gamma=%.2f"
+                    ),
+                    epoch + 1,
+                    train_metrics.get("query_hard_weight_mean", 1.0),
+                    train_metrics.get("surface_hard_weight_mean", 1.0),
+                    train_metrics.get("slice_hard_weight_mean", 1.0),
+                    str(self.config.loss.use_feature_class_balancing).lower(),
+                    self.config.loss.feature_focal_gamma,
+                )
 
             if (epoch + 1) % self.config.train.checkpoint_every_n_epochs == 0:
                 self.save_checkpoint(self.run_paths.checkpoints_dir / f"epoch_{epoch + 1:03d}.pt", is_best=False)
@@ -167,6 +184,8 @@ class Trainer:
 
         for batch in loader:
             batch = self._move_batch(batch)
+            if hasattr(self.loss_fn, "set_schedule_context"):
+                self.loss_fn.set_schedule_context(epoch=self.state.epoch, global_step=self.state.global_step)
             requires_grad = training or self.config.loss.use_physics
             with torch.set_grad_enabled(requires_grad):
                 with torch.cuda.amp.autocast(
@@ -186,6 +205,7 @@ class Trainer:
                     self.state.global_step += 1
 
             for key, value in metrics.items():
+                aggregate.setdefault(key, 0.0)
                 aggregate[key] += value
             num_batches += 1
 
@@ -203,6 +223,22 @@ class Trainer:
         return moved
 
     def save_checkpoint(self, path: Union[str, Path], is_best: bool) -> None:
+        branch_contract = None
+        geometry_backbone_contract = build_geometry_backbone_contract(self.config.model).as_dict()
+        if self.data_module.payload is not None:
+            payload = self.data_module.payload
+            adapter = BranchInputAdapter(
+                branch_input_mode=self.config.data.branch_input_mode,
+                branch_feature_mode=self.config.data.branch_feature_mode,
+                signature_points=self.config.data.num_surface_points,
+                encoded_geometry_latent_dim=self.config.data.encoded_geometry_latent_dim,
+            )
+            branch_contract = adapter.build_contract(
+                branch_input_dim=int(payload["branch_inputs"].shape[-1]),
+                geometry_representation=str(payload.get("geometry_representation", ["unknown"])[0]),
+                branch_encoding_type=str(payload.get("branch_encoding_type", ["unknown"])[0]),
+                include_reynolds=self.config.data.include_reynolds,
+            ).as_dict()
         checkpoint = {
             "model_state": self.model.state_dict(),
             "optimizer_state": self.optimizer.state_dict(),
@@ -214,6 +250,8 @@ class Trainer:
                 if self.data_module.dataset_capability is not None
                 else None
             ),
+            "branch_contract": branch_contract,
+            "geometry_backbone_contract": geometry_backbone_contract,
             "trainer_state": {
                 "epoch": self.state.epoch,
                 "global_step": self.state.global_step,

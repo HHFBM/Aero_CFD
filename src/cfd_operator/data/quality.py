@@ -217,6 +217,7 @@ def validate_dataset_payload(payload: Dict[str, Any], strict: bool = True) -> No
             "train_indices",
             "val_indices",
             "test_indices",
+            "benchmark_holdout_indices",
             "test_unseen_geometry_indices",
             "test_unseen_condition_indices",
         ]:
@@ -226,6 +227,7 @@ def validate_dataset_payload(payload: Dict[str, Any], strict: bool = True) -> No
                 _ensure(indices.min() >= 0 and indices.max() < num_samples, f"Split '{split_name}' contains out-of-range indices")
 
         _validate_split_disjointness(payload)
+        _validate_benchmark_holdout_split(payload)
         _validate_unseen_geometry_split(payload)
         _validate_unseen_condition_split(payload)
 
@@ -247,6 +249,27 @@ def _validate_unseen_geometry_split(payload: Dict[str, Any]) -> None:
     train_geometry_ids = set(airfoil_ids[np.asarray(payload["train_indices"], dtype=np.int64)].tolist())
     held_out_ids = set(airfoil_ids[np.asarray(payload["test_unseen_geometry_indices"], dtype=np.int64)].tolist())
     _ensure(train_geometry_ids.isdisjoint(held_out_ids), "Unseen geometry split leaks geometry IDs into training")
+
+
+def _validate_benchmark_holdout_split(payload: Dict[str, Any]) -> None:
+    if "benchmark_holdout_indices" not in payload:
+        return
+    benchmark_indices = np.asarray(payload["benchmark_holdout_indices"], dtype=np.int64)
+    _ensure(benchmark_indices.size > 0, "benchmark_holdout_indices is empty")
+    for split_key in [
+        "train_indices",
+        "val_indices",
+        "test_indices",
+        "test_unseen_geometry_indices",
+        "test_unseen_condition_indices",
+    ]:
+        if split_key not in payload:
+            continue
+        overlap = np.intersect1d(benchmark_indices, np.asarray(payload[split_key], dtype=np.int64))
+        _ensure(
+            overlap.size == 0,
+            f"benchmark_holdout_indices overlaps with '{split_key}', which would leak the frozen benchmark split into the development loop.",
+        )
 
 
 def _validate_unseen_condition_split(payload: Dict[str, Any]) -> None:

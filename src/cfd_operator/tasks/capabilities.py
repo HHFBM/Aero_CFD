@@ -145,6 +145,27 @@ def _bool_from_payload_mask(payload: dict[str, object], key: str) -> bool:
     return bool(np.isfinite(values).any() and np.any(np.abs(values) > 0.0)) or bool(np.isfinite(values).all())
 
 
+def _bool_from_availability_mask(payload: dict[str, object], key: str) -> bool:
+    if key not in payload:
+        return False
+    values = np.asarray(payload[key], dtype=np.float32)
+    if values.size == 0:
+        return False
+    return bool(np.any(values > 0.0))
+
+
+def _available_from_flag_or_key(
+    payload: dict[str, object],
+    *,
+    key: str,
+    flag_keys: tuple[str, ...] = (),
+) -> bool:
+    for flag_key in flag_keys:
+        if flag_key in payload:
+            return _bool_from_availability_mask(payload, flag_key)
+    return key in payload and _bool_from_payload_mask(payload, key)
+
+
 def infer_dataset_capability(payload: dict[str, object], *, dataset_name: str) -> DatasetCapability:
     """Infer current dataset capability from the legacy payload."""
 
@@ -168,70 +189,122 @@ def infer_dataset_capability(payload: dict[str, object], *, dataset_name: str) -
         )
 
     target_capabilities = {
-        "field_targets": status(name="field_targets", category="supervised", available="field_targets" in payload),
-        "scalar_targets": status(name="scalar_targets", category="supervised", available="scalar_targets" in payload),
+        "field_targets": status(
+            name="field_targets",
+            category="supervised",
+            available=_available_from_flag_or_key(payload, key="field_targets"),
+        ),
+        "scalar_targets": status(
+            name="scalar_targets",
+            category="supervised",
+            available=_available_from_flag_or_key(
+                payload,
+                key="scalar_targets",
+                flag_keys=("scalar_targets_available",),
+            ),
+        ),
         "surface_pressure": status(
             name="surface_pressure",
             category="supervised",
-            available="surface_pressure" in payload,
+            available=_available_from_flag_or_key(
+                payload,
+                key="surface_pressure",
+                flag_keys=("surface_pressure_available",),
+            ),
             note="Some paths reconstruct raw pressure from cp_reference; do not assume native pressure GT everywhere.",
         ),
         "surface_cp": status(
             name="surface_cp",
             category="derived",
-            available="surface_cp" in payload,
+            available=_available_from_flag_or_key(
+                payload,
+                key="surface_cp",
+                flag_keys=("surface_cp_available", "surface_pressure_available"),
+            ),
             note="Derived from surface pressure/cp_reference semantics even when used as a training target.",
         ),
         "surface_velocity": status(
             name="surface_velocity",
             category="supervised",
-            available="surface_velocity" in payload,
+            available=_available_from_flag_or_key(
+                payload,
+                key="surface_velocity",
+                flag_keys=("surface_velocity_available",),
+            ),
         ),
         "surface_nut": status(
             name="surface_nut",
             category="supervised",
-            available="surface_nut" in payload,
+            available=_available_from_flag_or_key(
+                payload,
+                key="surface_nut",
+                flag_keys=("surface_nut_available",),
+            ),
         ),
         "slice_fields": status(
             name="slice_fields",
             category="derived",
-            available="slice_fields" in payload,
+            available=_available_from_flag_or_key(
+                payload,
+                key="slice_fields",
+                flag_keys=("slice_available",),
+            ),
         ),
         "pressure_gradient_indicator": status(
             name="pressure_gradient_indicator",
             category="derived",
-            available="pressure_gradient_indicator" in payload,
+            available=_available_from_flag_or_key(
+                payload,
+                key="pressure_gradient_indicator",
+                flag_keys=("feature_available",),
+            ),
         ),
         "high_gradient_mask": status(
             name="high_gradient_mask",
             category="derived",
-            available="high_gradient_mask" in payload,
+            available=_available_from_flag_or_key(
+                payload,
+                key="high_gradient_mask",
+                flag_keys=("feature_available",),
+            ),
         ),
         "shock_indicator": status(
             name="shock_indicator",
             category="placeholder",
-            available="shock_indicator" in payload,
+            available=_available_from_flag_or_key(payload, key="shock_indicator"),
             trainable=False,
             note="High-gradient approximation only, not real shock supervision.",
         ),
         "shock_location": status(
             name="shock_location",
             category="placeholder",
-            available="shock_location" in payload,
+            available=_available_from_flag_or_key(
+                payload,
+                key="shock_location",
+                flag_keys=("shock_location_available",),
+            ),
             trainable=False,
             note="High-gradient approximation only, not real shock supervision.",
         ),
         "surface_heat_flux": status(
             name="surface_heat_flux",
             category="placeholder",
-            available="surface_heat_flux" in payload,
+            available=_available_from_flag_or_key(
+                payload,
+                key="surface_heat_flux",
+                flag_keys=("surface_heat_flux_available",),
+            ),
             trainable=False,
             note="Placeholder / approximate output only.",
         ),
         "surface_wall_shear": status(
             name="surface_wall_shear",
             category="placeholder",
-            available="surface_wall_shear" in payload,
+            available=_available_from_flag_or_key(
+                payload,
+                key="surface_wall_shear",
+                flag_keys=("surface_wall_shear_available",),
+            ),
             trainable=False,
             note="Derived wall shear proxy only.",
         ),

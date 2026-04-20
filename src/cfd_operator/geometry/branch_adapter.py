@@ -20,6 +20,43 @@ from .preprocess import CanonicalGeometry2D, canonicalize_closed_contour, estima
 BranchInputMode = Literal["legacy_fixed_features", "encoded_geometry"]
 
 
+@dataclass(frozen=True)
+class BranchInputContract:
+    branch_input_mode: BranchInputMode
+    branch_feature_mode: str
+    branch_input_dim: int
+    geometry_representation: str
+    branch_encoding_type: str
+    include_reynolds: bool
+    num_surface_points: int
+    encoded_geometry_latent_dim: int
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "branch_input_mode": self.branch_input_mode,
+            "branch_feature_mode": self.branch_feature_mode,
+            "branch_input_dim": int(self.branch_input_dim),
+            "geometry_representation": self.geometry_representation,
+            "branch_encoding_type": self.branch_encoding_type,
+            "include_reynolds": bool(self.include_reynolds),
+            "num_surface_points": int(self.num_surface_points),
+            "encoded_geometry_latent_dim": int(self.encoded_geometry_latent_dim),
+        }
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, object]) -> "BranchInputContract":
+        return cls(
+            branch_input_mode=str(payload.get("branch_input_mode", "legacy_fixed_features")),  # type: ignore[arg-type]
+            branch_feature_mode=str(payload.get("branch_feature_mode", "params")),
+            branch_input_dim=int(payload.get("branch_input_dim", 0)),
+            geometry_representation=str(payload.get("geometry_representation", "unknown")),
+            branch_encoding_type=str(payload.get("branch_encoding_type", "unknown")),
+            include_reynolds=bool(payload.get("include_reynolds", False)),
+            num_surface_points=int(payload.get("num_surface_points", 0)),
+            encoded_geometry_latent_dim=int(payload.get("encoded_geometry_latent_dim", 16)),
+        )
+
+
 def sample_surface_signature(airfoil: AirfoilParameterization, num_points: int = 32) -> np.ndarray:
     points = airfoil.surface_points(max(num_points, 8))
     canonical = canonicalize_closed_contour(points, num_points=num_points)
@@ -167,6 +204,25 @@ class BranchInputAdapter:
         object.__setattr__(self, "feature_builder", GeometryFeatureBuilder(self.branch_feature_mode, self.signature_points))
         object.__setattr__(self, "geometry_encoder", GeometryEncoder(self.encoded_geometry_latent_dim, self.signature_points))
 
+    def build_contract(
+        self,
+        *,
+        branch_input_dim: int,
+        geometry_representation: str,
+        branch_encoding_type: str,
+        include_reynolds: bool,
+    ) -> BranchInputContract:
+        return BranchInputContract(
+            branch_input_mode=self.branch_input_mode,
+            branch_feature_mode=self.branch_feature_mode,
+            branch_input_dim=branch_input_dim,
+            geometry_representation=geometry_representation,
+            branch_encoding_type=branch_encoding_type,
+            include_reynolds=include_reynolds,
+            num_surface_points=self.signature_points,
+            encoded_geometry_latent_dim=self.encoded_geometry_latent_dim,
+        )
+
     def build_from_airfoil(
         self,
         airfoil: AirfoilParameterization,
@@ -275,30 +331,30 @@ class BranchInputAdapter:
         mach: float,
         aoa_deg: float,
         reynolds: Optional[float],
-        expected_dim: int,
-        include_reynolds: bool,
+        contract: BranchInputContract,
     ) -> np.ndarray:
+        expected_dim = int(contract.branch_input_dim)
         if self.branch_input_mode == "encoded_geometry":
             return self._build_encoded(
                 surface_points=canonical_geometry.normalized_surface_points,
                 mach=mach,
                 aoa_deg=aoa_deg,
-                reynolds=reynolds if include_reynolds else None,
+                reynolds=reynolds if contract.include_reynolds else None,
                 target_dim=expected_dim,
             )
 
-        flow_array = _flow_array(mach=mach, aoa_deg=aoa_deg, reynolds=reynolds if include_reynolds else None)
+        flow_array = _flow_array(mach=mach, aoa_deg=aoa_deg, reynolds=reynolds if contract.include_reynolds else None)
         if canonical_geometry.airfoil is not None:
             default_branch = self.feature_builder.build_from_airfoil(
                 canonical_geometry.airfoil,
                 mach=mach,
                 aoa_deg=aoa_deg,
-                reynolds=reynolds if include_reynolds else None,
+                reynolds=reynolds if contract.include_reynolds else None,
             ).astype(np.float32)
             if default_branch.shape[0] == expected_dim:
                 return default_branch
 
-        signature_dim = expected_dim - min(flow_array.shape[0], 3 if include_reynolds else 2)
+        signature_dim = expected_dim - min(flow_array.shape[0], 3 if contract.include_reynolds else 2)
         if signature_dim > 0 and signature_dim % 2 == 0:
             num_surface_points = signature_dim // 2
             surface_signature = sample_surface_signature_from_points(
@@ -316,7 +372,12 @@ class BranchInputAdapter:
             return np.concatenate([geometry_params, np.asarray([mach, aoa_deg], dtype=np.float32)], axis=0).astype(np.float32)
 
         raise ValueError(
-            "Could not build legacy fixed branch_inputs for this checkpoint from the provided geometry input."
+            "Could not build branch_inputs for the requested branch contract. "
+            f"expected_dim={expected_dim}, branch_input_mode={self.branch_input_mode}, "
+            f"branch_encoding_type={contract.branch_encoding_type}, "
+            f"geometry_representation={contract.geometry_representation}, "
+            f"geometry_mode={canonical_geometry.geometry_mode}. "
+            "Provide compatible geometry_params or surface_points depending on the checkpoint contract."
         )
 
     def _build_encoded(

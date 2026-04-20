@@ -3,6 +3,7 @@
 from .base import AirfoilParameterization
 from .branch_adapter import (
     BranchInputAdapter,
+    BranchInputContract,
     BranchInputMode,
     GeometryEncoder,
     GeometryFeatureBuilder,
@@ -16,6 +17,7 @@ from .semantics import GeometrySemantics, ensure_geometry_payload_metadata
 __all__ = [
     "AirfoilParameterization",
     "BranchInputAdapter",
+    "BranchInputContract",
     "BranchInputMode",
     "CSTParameterization",
     "NACA4Airfoil",

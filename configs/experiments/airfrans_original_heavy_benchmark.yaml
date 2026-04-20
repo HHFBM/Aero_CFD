@@ -1,0 +1,96 @@
+experiment:
+  name: airfrans_original_heavy_benchmark
+  seed: 42
+  output_root: outputs
+  device: cpu
+
+data:
+  name: airfrans_original
+  dataset_type: airfrans_original
+  dataset_path: outputs/data/airfrans_original_heavy_benchmarksplit.npz
+  airfrans_root: outputs/data/airfrans_raw
+  airfrans_archive_path: outputs/data/AirfRANS_original.tar
+  airfrans_task: full
+  airfrans_download: false
+  airfrans_unzip: false
+  airfrans_max_samples: null
+  train_ratio: 0.7
+  val_ratio: 0.15
+  test_ratio: 0.15
+  num_samples: 1000
+  num_geometries: 20
+  conditions_per_geometry: 8
+  num_query_points: 1024
+  num_surface_points: 256
+  mach_range: [0.2, 0.78]
+  aoa_range: [-2.0, 8.0]
+  normalization:
+    branch: standard
+    coordinates: standard
+    fields: standard
+    scalars: standard
+  include_reynolds: false
+  branch_feature_mode: params
+  field_names: [u, v, p, nut]
+  pressure_target_mode: cp_like
+  low_fidelity_enabled: false
+  unseen_geometry_ratio: 0.15
+  unseen_condition_ratio: 0.15
+  strict_quality_checks: false
+
+model:
+  name: deeponet
+  branch_input_dim: 514
+  trunk_input_dim: 2
+  field_output_dim: 4
+  scalar_output_dim: 2
+  hidden_dim: 256
+  latent_dim: 256
+  branch_layers: 4
+  trunk_layers: 4
+  activation: gelu
+  dropout: 0.0
+  use_fourier_features: true
+  fourier_features_dim: 64
+  scalar_head_hidden_dim: 128
+
+train:
+  epochs: 30
+  batch_size: 4
+  learning_rate: 0.001
+  weight_decay: 1.0e-6
+  optimizer: adam
+  scheduler:
+    name: cosine
+    t_max: 30
+    min_lr: 1.0e-5
+  mixed_precision: false
+  grad_clip_norm: 1.0
+  log_every_n_steps: 10
+  checkpoint_every_n_epochs: 1
+  early_stopping_patience: 12
+  resume_from: null
+
+loss:
+  field_weight: 1.0
+  surface_weight: 0.5
+  scalar_weight: 0.5
+  physics_weight: 0.05
+  boundary_weight: 0.05
+  field_loss_type: mse
+  scalar_loss_type: mse
+  use_physics: true
+  use_energy_residual: false
+
+eval:
+  batch_size: 4
+  num_visualization_samples: 3
+  save_plots: true
+  metrics_path: outputs/eval/metrics.json
+  report_path: outputs/eval/report.md
+  split_name: test
+
+serve:
+  host: 127.0.0.1
+  port: 8000
+  checkpoint_path: outputs/airfrans_original_heavy_benchmark/checkpoints/best.pt

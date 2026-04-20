@@ -11,10 +11,35 @@ Assumptions:
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from typing import Dict, Optional, Tuple
 
 import torch
 import torch.nn.functional as F
+
+
+@dataclass
+class ResidualOutputs:
+    continuity: torch.Tensor
+    momentum_x: torch.Tensor
+    momentum_y: torch.Tensor
+    nut_transport_proxy: torch.Tensor | None = None
+    energy: torch.Tensor | None = None
+    mode: str = "unknown"
+    strict_pde: bool = False
+    proxy_terms: tuple[str, ...] = field(default_factory=tuple)
+
+    def as_dict(self) -> Dict[str, torch.Tensor]:
+        outputs: Dict[str, torch.Tensor] = {
+            "continuity": self.continuity,
+            "momentum_x": self.momentum_x,
+            "momentum_y": self.momentum_y,
+        }
+        if self.nut_transport_proxy is not None:
+            outputs["nut_transport_proxy"] = self.nut_transport_proxy
+        if self.energy is not None:
+            outputs["energy"] = self.energy
+        return outputs
 
 
 def compute_gradients(
@@ -259,3 +284,65 @@ def incompressible_rans_proxy_residuals(
         "momentum_y": momentum_y,
         "nut_transport": nut_transport,
     }
+
+
+def compute_residual_outputs(
+    predicted_fields: torch.Tensor,
+    coords: torch.Tensor,
+    field_names: tuple[str, ...],
+    coord_scale: Optional[torch.Tensor] = None,
+    gamma: float = 1.4,
+    include_energy: bool = False,
+) -> ResidualOutputs:
+    """Unified wrapper returning structured residual outputs.
+
+    The current project supports two main field conventions:
+    - ``[u, v, p, rho]``: Euler-like residuals
+    - ``[u, v, p, nut]``: incompressible RANS proxy residuals
+
+    Any other 4th channel is treated as unsupported and produces zero-valued
+    placeholder residuals rather than silently applying an invalid PDE.
+    """
+
+    aux_name = field_names[3] if len(field_names) >= 4 else "unknown"
+    zero = torch.zeros_like(predicted_fields[..., 0])
+    if aux_name == "rho":
+        outputs = compressible_euler_residuals(
+            predicted_fields=predicted_fields,
+            coords=coords,
+            coord_scale=coord_scale,
+            gamma=gamma,
+            include_energy=include_energy,
+        )
+        return ResidualOutputs(
+            continuity=outputs["continuity"],
+            momentum_x=outputs["momentum_x"],
+            momentum_y=outputs["momentum_y"],
+            energy=outputs.get("energy"),
+            mode="compressible_euler",
+            strict_pde=True,
+            proxy_terms=(),
+        )
+    if aux_name == "nut":
+        outputs = incompressible_rans_proxy_residuals(
+            predicted_fields=predicted_fields,
+            coords=coords,
+            coord_scale=coord_scale,
+        )
+        return ResidualOutputs(
+            continuity=outputs["continuity"],
+            momentum_x=outputs["momentum_x"],
+            momentum_y=outputs["momentum_y"],
+            nut_transport_proxy=outputs["nut_transport"],
+            mode="incompressible_rans_proxy",
+            strict_pde=False,
+            proxy_terms=("momentum_proxy", "nut_transport_proxy"),
+        )
+    return ResidualOutputs(
+        continuity=zero,
+        momentum_x=zero,
+        momentum_y=zero,
+        mode=f"unsupported_aux_{aux_name}",
+        strict_pde=False,
+        proxy_terms=("unsupported_field_layout",),
+    )
